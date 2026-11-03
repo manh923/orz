@@ -20,7 +20,7 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 ソースはUTF-8で、改行は空白と同じ扱いです。トークンの間ならどこで改行しても構いません。
 
 - **コメント:** `//`は行末まで、`/* */`は閉じるまで。整形ツールで残せるよう、字句解析ではコメントを捨てずに保持する
-- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`
+- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`
 - **型名:** `bool`、`8`、`32`、`64`、`decnum`、`string`、`pointer`、`array`、`address`
 - **`:`と`=`:** 別々のトークンとして扱う
 
@@ -292,7 +292,7 @@ export count:32 = 0;
 
 ## メモリと標準機能
 
-メモリは`allocate`で確保し、プログラム終了時にまとめて解放します。個別の解放はありません。
+メモリは`allocate`で確保し、プログラム終了時にまとめて解放します。個別の解放はありません。長く動くプログラムでは、`arena`で確保したものをまとめて途中で解放できます。
 
 ### メモリ
 
@@ -307,6 +307,25 @@ p:pointer:32 = allocate(3 * size(:32));
 p[0] = 10;    // OK
 p[3] = 40;    // 範囲外だがチェックされない
 ```
+
+### 領域（arena）
+
+`arena { }`の中で確保したメモリは、閉じ`}`でまとめて解放します。
+
+```
+while (running) {
+    arena {
+        p:Point = Point(1, 2);
+        buf:array:8 = array(1024);
+        draw(p, buf);
+    }   // p と buf はここで解放される
+}
+```
+
+- **対象:** `allocate`、構造体、`array`、文字列など、`arena`の中で確保したものすべて。中で呼んだ関数が確保したものも含む
+- **入れ子:** できる。確保先はいちばん内側の`arena`
+- **持ち出し禁止:** `arena`の中で確保した値を、外から届く場所（`arena`の外で宣言した変数、グローバル変数、外で確保したもののフィールドや要素）に入れるとコンパイルエラー。呼んだ関数の中での代入も含めて調べる
+- **外:** `arena`の外で確保したものは、これまでどおり終了時に解放する
 
 ### 文字列
 
