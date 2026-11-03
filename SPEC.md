@@ -42,8 +42,8 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 
 | 表記 | 意味 |
 | --- | --- |
-| `\lb` | 改行 |
-| `\tab` | タブ |
+| `\lb`、`\n` | 改行 |
+| `\tab`、`\t` | タブ |
 | `\"` | ダブルクォート |
 | `\\` | バックスラッシュ |
 | `\'` | シングルクォート |
@@ -86,7 +86,9 @@ enum Type {
     String,
     Pointer(Box<Type>),
     Array(Box<Type>),
-    Struct(String),
+    Struct(String, Vec<Type>),
+    Function(Box<Type>, Vec<Type>),
+    Param(String),
     Address,
 }
 ```
@@ -296,6 +298,62 @@ r.x = 7;            // p.x は 5 のまま
 - **`==`と`!=`:** 同じものを指しているかを比べる。中身は比べない
 - **フィールドの型:** 構造体のフィールドに構造体を書くと、そのアドレスを持つ。自分と同じ構造体も`maybe`を付ければ書ける（`next:maybe:Node;`）
 
+### 関数ポインタ
+
+関数の型は`function:戻り値の型(引数の型, ...)`と書きます。関数名をそのまま値として使えます。
+
+```
+function 32 add(a:32, b:32) {
+    return a + b;
+}
+
+f:function:32(32, 32) = add;
+print(f(1, 2));   // 3
+
+g:function:nothing() = main;
+```
+
+- 型が合わない関数を入れるとコンパイルエラー
+- `null`を入れるには`maybe:function:32(32, 32)`のように`maybe`を付ける
+- 大きさはポインタと同じ幅
+
+### ジェネリクス
+
+構造体や関数の名前の後ろに`:T`を付けると、型を引数として受け取れます。型の書き方は`pointer:32`と同じで、`List:32`は「`32`の`List`」です。
+
+```
+struct List:T {
+    items:array:T;
+    count:32;
+}
+
+function T get:T(list:List:T, i:32) {
+    return list.items[i];
+}
+
+nums:List:32 = List:32(array(10), 0);
+x:32 = get(nums, 0);      // T は引数から 32 に決まる
+y:32 = get:32(nums, 0);   // 明示してもよい
+```
+
+- **複数:** `struct Map:K:V { ... }`のように並べる。`Map:string:32`は`K`が`string`、`V`が`32`
+- **数の決まり方:** 型引数の数は定義で決まるので、`Map:string:List:32`のように入れ子にしても読み方は1通り
+- **省略:** 関数の型引数は、引数や代入先から決まれば省略できる。決まらなければコンパイルエラー。構造体を作るときの`List:32(...)`は省略できない
+- **実装:** 使われた型ごとに別々の関数や構造体としてコンパイルする。実行時の遅さはない
+- **制約:** `T`に対してできるのは、代入、引数として渡す、`return`だけ。`+`や`<`などは使えない。比べたいときは関数ポインタを渡す
+
+```
+function nothing sort:T(a:array:T, less:function:bool(T, T)) {
+    // less(a[i], a[j]) で比べる
+}
+
+function bool less32(a:32, b:32) {
+    return a < b;
+}
+
+sort(nums.items, less32);
+```
+
 ### グローバル変数と固定値
 
 関数の外に書いた宣言はグローバル変数になります。値を変えないものには`immutable`を付け、代入はコンパイルエラーにします。
@@ -457,7 +515,8 @@ function nothing main() {
 4. 変数、`if`、`while`、関数呼び出し
 5. `string`、`array`、`pointer`、`allocate`、範囲チェック、`print`、ファイル入出力
 6. `struct`、`maybe`、`8`、`64`、`decnum`
-7. 整形ツールと`bignum`ライブラリ
+7. 関数ポインタ、ジェネリクス、`arena`
+8. 整形ツールと`bignum`ライブラリ
 
 ## 未決事項
 
