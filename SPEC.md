@@ -6,7 +6,7 @@ Nov 3, 2026 · @一廣
 
 orzは、Cの書きやすさと実行時の安全確認を組み合わせた、普段使い向けの小さな静的型付き言語です。Claude Codeでの実装に向けて、ここまでの決定事項をまとめます。
 
-名前は`orz`、日本語名は土下座、ソースファイルの拡張子は`.orz`です。
+名前は`orz`、日本語名は土下座、ソースファイルの拡張子は`.orz`、宣言だけを書くヘッダーファイルの拡張子は`.orh`です。
 
 - **設計方針:** キーワードは簡単な英単語だけにする。文法は小さく保ち、改行に意味を持たせない
 - **エラー:** できるだけコンパイル時にエラーとして返す。コンパイル時にわからないものだけ実行時に止める
@@ -20,7 +20,7 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 ソースはUTF-8で、改行は空白と同じ扱いです。トークンの間ならどこで改行しても構いません。
 
 - **コメント:** `//`は行末まで、`/* */`は閉じるまで。整形ツールで残せるよう、字句解析ではコメントを捨てずに保持する
-- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`
+- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`、`extern`
 - **型名:** `bool`、`8`、`32`、`64`、`decnum`、`string`、`pointer`、`array`、`address`
 - **`:`と`=`:** 別々のトークンとして扱う
 
@@ -38,12 +38,15 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 
 文字列リテラルは閉じる`"`まで読み、途中の改行もそのまま文字列に含めます。
 
+`“ ”`や`‘ ’`（スマートフォンなどで自動で変わる全角の引用符）はコンパイルエラーにし、半角の`"`と`'`に直すよう表示します。
+
 ### エスケープ
 
 | 表記 | 意味 |
 | --- | --- |
 | `\lb`、`\n` | 改行 |
 | `\tab`、`\t` | タブ |
+| `\r` | 復帰（CR） |
 | `\"` | ダブルクォート |
 | `\\` | バックスラッシュ |
 | `\'` | シングルクォート |
@@ -369,8 +372,33 @@ immutable WIDTH:32 = 80;
 
 `import`した名前が衝突したらコンパイルエラーです。
 
-- **パス:** `import`を書いたファイルから見た相対パス
+- **`"..."`:** `import`を書いたファイルから見た相対パス
+- **`<...>`:** 標準ライブラリのフォルダから探す（Cの`#include <stdio.h>`と同じ）
 - **同じファイル:** 何度`import`されても1回だけ読む
+
+```
+import <stdio.orh>;
+import "util.orz";
+
+function nothing main() {
+    print("aaa");
+}
+```
+
+### ヘッダーファイル（.orh）とextern
+
+`.orh`には宣言だけを書きます。書けるのは`extern`の付いた関数、`struct`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
+
+```
+// socket.orh
+extern function 32 socket(domain:32, type:32, protocol:32);
+extern function 64 read(fd:32, buf:pointer:8, n:64);
+extern function 64 write(fd:32, buf:pointer:8, n:64);
+extern function 32 close(fd:32);
+```
+
+- orzどうしは`import "x.orz"`でソースを直接読むので、ヘッダーは要らない
+- 標準ライブラリは`.orh`でOSを宣言し、その上に使いやすい関数をorzで書く
 
 ```
 import "math.orz";
@@ -461,7 +489,7 @@ if (b[0] == 'A') {
 
 ### 入出力
 
-`print(x)`は自動で改行し、`put(x)`は改行しません。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
+`print(x)`は自動で改行し、`put(x)`は改行しません。どちらも`import <stdio.orh>;`で使えるようになります。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
 
 出力の最下層は`putc`だけを環境ごとに差し替えます。
 
@@ -473,7 +501,7 @@ if (b[0] == 'A') {
 
 ### ファイル
 
-`read_file(path)`はファイルの内容を`string`で返し、`write_file(path, text)`は内容を書き込みます。
+`read_file(path)`と`write_file(path, text)`も`stdio.orh`にあります。`read_file(path)`はファイルの内容を`string`で返し、`write_file(path, text)`は内容を書き込みます。
 
 ```
 text:string = read_file("input.txt");
@@ -483,6 +511,7 @@ write_file("output.txt", text);
 ### ライブラリ
 
 - **`bignum`:** `big_from`、`big_add`、`big_print`のような関数で提供する
+- **組み込み:** `allocate`、`length`、`size`、`copy`、`collect`、`bytes`、`array`は`import`なしで使える
 - **暗号:** 可変長の`bignum`は使わず、固定長で定数時間に計算する専用ライブラリを分ける
 
 ### 開発ツール
@@ -502,6 +531,8 @@ function 32 main() {
 ここまでの仕様を使った完成形の例は次のとおりです。
 
 ```
+import <stdio.orh>;
+
 function 32 add(a:32, b:32) {
     return a + b;
 }
