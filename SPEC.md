@@ -372,12 +372,12 @@ immutable WIDTH:32 = 80;
 
 `import`した名前が衝突したらコンパイルエラーです。
 
-- **`"..."`:** `import`を書いたファイルから見た相対パス
-- **`<...>`:** 標準ライブラリのフォルダから探す（Cの`#include <stdio.h>`と同じ）
+- **名前だけ:** `import stdio;`のように書くと、標準ライブラリから探す。拡張子は書かない
+- **`"..."`:** 自分のファイル。`import`を書いたファイルから見た相対パス
 - **同じファイル:** 何度`import`されても1回だけ読む
 
 ```
-import <stdio.orh>;
+import stdio;
 import "util.orz";
 
 function nothing main() {
@@ -387,7 +387,7 @@ function nothing main() {
 
 ### ヘッダーファイル（.orh）とextern
 
-`.orh`には宣言だけを書きます。書けるのは`extern`の付いた関数、`struct`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
+`.orh`は、ライブラリを作る人向けの、宣言だけを書くファイルです。標準ライブラリを使うだけなら意識する必要はありません。書けるのは`extern`の付いた関数、`struct`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
 
 ```
 // socket.orh
@@ -398,7 +398,15 @@ extern function 32 close(fd:32);
 ```
 
 - orzどうしは`import "x.orz"`でソースを直接読むので、ヘッダーは要らない
-- 標準ライブラリは`.orh`でOSを宣言し、その上に使いやすい関数をorzで書く
+- 標準ライブラリは`.orh`でOSやランタイムを宣言し、その上に使いやすい関数をorzで書く
+- `extern`の関数にジェネリクスを使うと、使われた型ごとにランタイムの関数を呼ぶ。たとえば`extern function nothing print:T(x:T);`があれば、`print(42)`はランタイムの`print_32`を呼ぶ
+
+| 標準ライブラリ | 中身 | 用意する時期 |
+| --- | --- | --- |
+| `stdio` | `print`、`put`、`read_file`、`write_file` | 手順5 |
+| `math` | `sqrt`、`sin`など | 手順6 |
+| `socket` | ソケット | 必要になったとき |
+| `bignum` | 大きな整数 | 手順8 |
 
 ```
 import "math.orz";
@@ -489,7 +497,7 @@ if (b[0] == 'A') {
 
 ### 入出力
 
-`print(x)`は自動で改行し、`put(x)`は改行しません。どちらも`import <stdio.orh>;`で使えるようになります。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
+`print(x)`は自動で改行し、`put(x)`は改行しません。どちらも`import stdio;`で使えるようになります。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
 
 出力の最下層は`putc`だけを環境ごとに差し替えます。
 
@@ -501,7 +509,7 @@ if (b[0] == 'A') {
 
 ### ファイル
 
-`read_file(path)`と`write_file(path, text)`も`stdio.orh`にあります。`read_file(path)`はファイルの内容を`string`で返し、`write_file(path, text)`は内容を書き込みます。
+`read_file(path)`と`write_file(path, text)`も`stdio`にあります。`read_file(path)`はファイルの内容を`string`で返し、`write_file(path, text)`は内容を書き込みます。
 
 ```
 text:string = read_file("input.txt");
@@ -520,6 +528,16 @@ write_file("output.txt", text);
 
 ## サンプルと初期実装の目標
 
+いちばん小さいhello worldは次のとおりです。
+
+```
+import stdio;
+
+function nothing main() {
+    print("hello");
+}
+```
+
 最初の目標は、次のプログラムをx86-64向けに変換して動かすことです。
 
 ```
@@ -531,7 +549,7 @@ function 32 main() {
 ここまでの仕様を使った完成形の例は次のとおりです。
 
 ```
-import <stdio.orh>;
+import stdio;
 
 function 32 add(a:32, b:32) {
     return a + b;
