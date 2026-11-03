@@ -20,7 +20,7 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 ソースはUTF-8で、改行は空白と同じ扱いです。トークンの間ならどこで改行しても構いません。
 
 - **コメント:** `//`は行末まで、`/* */`は閉じるまで。整形ツールで残せるよう、字句解析ではコメントを捨てずに保持する
-- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`、`extern`
+- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`、`extern`、`as`
 - **型名:** `bool`、`8`、`32`、`64`、`decnum`、`string`、`pointer`、`array`、`address`
 - **`:`と`=`:** 別々のトークンとして扱う
 
@@ -105,7 +105,7 @@ a:array:32 = [10, 20, 30];
 b:array:32 = array(100);    // 要素100個、0で初期化
 
 a[0] = 5;
-print(length(a));
+stdio.print(length(a));
 ```
 
 - **中身:** 要素数のヘッダが付いたメモリを指すアドレス。関数には1ワードで渡せる
@@ -123,7 +123,7 @@ print(length(a));
 next:maybe:Node = null;
 
 if (next != null) {
-    print(next.value);
+    stdio.print(next.value);
 }
 ```
 
@@ -199,7 +199,7 @@ function pointer:32 first(p:pointer:32) {
 }
 
 function nothing main() {
-    print("hello");
+    stdio.print("hello");
 }
 ```
 
@@ -217,9 +217,9 @@ function nothing main() {
 
 ```
 if (x > 3) {
-    print("big");
+    stdio.print("big");
 } else {
-    print("small");
+    stdio.print("small");
 }
 
 while (i < 3) {
@@ -231,11 +231,11 @@ while (i < 3) {
 
 ```
 if (x > 10) {
-    print("big");
+    stdio.print("big");
 } else if (x > 3) {
-    print("middle");
+    stdio.print("middle");
 } else {
-    print("small");
+    stdio.print("small");
 }
 ```
 
@@ -284,7 +284,7 @@ struct Point {
 }
 
 p:Point = Point(1, 2);
-print(p.x);
+stdio.print(p.x);
 ```
 
 構造体の変数は、`array`と同じくアドレスを持ちます。`Point(1, 2)`はメモリを確保して、そのアドレスを返します。関数には1ワードで渡せます。
@@ -311,7 +311,7 @@ function 32 add(a:32, b:32) {
 }
 
 f:function:32(32, 32) = add;
-print(f(1, 2));   // 3
+stdio.print(f(1, 2));   // 3
 
 g:function:nothing() = main;
 ```
@@ -370,18 +370,29 @@ immutable WIDTH:32 = 80;
 
 `import`で別ファイルを読み込みます。ほかのファイルから使えるのは、`export`を付けたトップレベルの関数とグローバル変数だけです。
 
-`import`した名前が衝突したらコンパイルエラーです。
+`import`したものは、名前空間（ライブラリの名前）を前に付けて使います。別々のライブラリに同じ名前の関数があってもぶつかりません。
 
 - **名前だけ:** `import stdio;`のように書くと、標準ライブラリのフォルダから`stdio.orh`と`stdio.orz`を探し、あるものを全部読む。拡張子は書かない
 - **`"..."`:** 自分のファイル。`import`を書いたファイルから見た相対パス
 - **同じファイル:** 何度`import`されても1回だけ読む
+- **名前空間:** 標準ライブラリはその名前（`import http;`なら`http`）、自分のファイルは拡張子を除いたファイル名（`import "lib/util.orz";`なら`util`）
+- **`as`:** `import "a/util.orz" as autil;`のように名前空間を付け替えられる。名前空間どうしがぶつかったらコンパイルエラーなので、そのときに使う
+- **使い方:** 関数は`http.serve(...)`、型は`req:http.Request`、グローバル変数は`util.count`のように書く
+- **ファイルの中:** 自分のファイルの中の名前には、名前空間を付けない
+- **変数名:** 名前空間と同じ名前の変数は宣言できない
 
 ```
 import stdio;
+import http;
 import "util.orz";
 
+function http.Response hello(req:http.Request) {
+    return http.text(200, "hello from orz");
+}
+
 function nothing main() {
-    print("aaa");
+    stdio.print(util.greeting());
+    http.serve(8080, hello);
 }
 ```
 
@@ -399,7 +410,7 @@ extern function 32 close(fd:32);
 
 - orzどうしは`import "x.orz"`でソースを直接読むので、ヘッダーは要らない
 - 標準ライブラリは`.orh`でOSやランタイムを宣言し、その上に使いやすい関数をorzで書く
-- `extern`の関数にジェネリクスを使うと、使われた型ごとにランタイムの関数を呼ぶ。たとえば`extern function nothing print:T(x:T);`があれば、`print(42)`はランタイムの`print_32`を呼ぶ
+- `extern`の関数にジェネリクスを使うと、使われた型ごとにランタイムの関数を呼ぶ。たとえば`stdio.orh`に`extern function nothing print:T(x:T);`があれば、`stdio.print(42)`はランタイムの`print_32`を呼ぶ
 
 | 標準ライブラリ | 中身 | 用意する時期 |
 | --- | --- | --- |
@@ -484,20 +495,20 @@ while (running) {
 name:string = "orz";
 msg:string = "hello, " + name;
 if (msg == "hello, orz") {
-    print(msg);
+    stdio.print(msg);
 }
 ```
 
 ```
 b:pointer:8 = bytes(s);
 if (b[0] == 'A') {
-    print("A です");
+    stdio.print("A です");
 }
 ```
 
 ### 入出力
 
-`print(x)`は自動で改行し、`put(x)`は改行しません。どちらも`import stdio;`で使えるようになります。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
+`stdio.print(x)`は自動で改行し、`stdio.put(x)`は改行しません。`import stdio;`を書いて使います。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
 
 出力の最下層は`putc`だけを環境ごとに差し替えます。
 
@@ -509,16 +520,16 @@ if (b[0] == 'A') {
 
 ### ファイル
 
-`read_file(path)`と`write_file(path, text)`も`stdio`にあります。`read_file(path)`はファイルの内容を`string`で返し、`write_file(path, text)`は内容を書き込みます。
+`stdio.read_file(path)`はファイルの内容を`string`で返し、`stdio.write_file(path, text)`は内容を書き込みます。
 
 ```
-text:string = read_file("input.txt");
-write_file("output.txt", text);
+text:string = stdio.read_file("input.txt");
+stdio.write_file("output.txt", text);
 ```
 
 ### ライブラリ
 
-- **`bignum`:** `big_from`、`big_add`、`big_print`のような関数で提供する
+- **`bignum`:** `bignum.from`、`bignum.add`、`bignum.print`のような関数で提供する
 - **組み込み:** `allocate`、`length`、`size`、`copy`、`collect`、`bytes`、`array`は`import`なしで使える
 - **暗号:** 可変長の`bignum`は使わず、固定長で定数時間に計算する専用ライブラリを分ける
 
@@ -534,7 +545,7 @@ write_file("output.txt", text);
 import stdio;
 
 function nothing main() {
-    print("hello");
+    stdio.print("hello");
 }
 ```
 
@@ -561,8 +572,8 @@ function nothing main() {
     p:pointer:32 = allocate(3 * size(:32));
 
     p[0] = x;
-    print(name);
-    print(p[0]);
+    stdio.print(name);
+    stdio.print(p[0]);
 }
 ```
 
