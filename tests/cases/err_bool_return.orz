@@ -1,0 +1,4 @@
+// error: 比較 `<` の結果は `bool`
+function 32 main() {
+    return 1 < 2;
+}

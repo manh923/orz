@@ -1,0 +1,4 @@
+// runtime: 指数が負
+function 32 main() {
+    return 2 ^ (0 - 1);
+}

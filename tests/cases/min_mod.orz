@@ -1,0 +1,4 @@
+// exit: 0
+function 32 main() {
+    return -2147483648 % -1;
+}

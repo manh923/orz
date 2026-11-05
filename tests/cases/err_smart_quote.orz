@@ -1,0 +1,4 @@
+// error: 全角の引用符
+function nothing main() {
+    x:string = “aaa”;
+}

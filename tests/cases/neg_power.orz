@@ -1,0 +1,5 @@
+// exit: 6
+// -2 ^ 2 は -(2 ^ 2)
+function 32 main() {
+    return -2 ^ 2 + 10;
+}

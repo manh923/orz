@@ -1,0 +1,4 @@
+// exit: 11
+function 32 main() {
+    return 2 + 3 * 4 - 10 / 3;
+}

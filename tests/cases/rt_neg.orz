@@ -1,0 +1,4 @@
+// runtime: 計算の結果が 32 の範囲
+function 32 main() {
+    return -(-2147483647 - 1);
+}

@@ -1,0 +1,4 @@
+// error: `nothing` の関数では値を `return` できません
+function nothing main() {
+    return 1;
+}

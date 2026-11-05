@@ -1,0 +1,4 @@
+// exit: 111
+function 32 main() {
+    return (12 nand 10) + (12 nor 10) + (12 xnor 10) + (not -43) + 100;
+}

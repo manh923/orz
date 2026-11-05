@@ -1,0 +1,4 @@
+// runtime: 0 で割りました
+function 32 main() {
+    return 1 / (2 - 2);
+}
