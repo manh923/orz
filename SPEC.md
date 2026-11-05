@@ -110,7 +110,9 @@ stdio.print(length(a));
 
 - **中身:** 要素数のヘッダが付いたメモリを指すアドレス。関数には1ワードで渡せる
 - **長さ:** 作成時に固定する。伸ばせるリストはライブラリで提供する
-- **`length(a)`:** `array`にだけ使える。`pointer`に使うとコンパイルエラー
+- **`length(a)`:** 要素数を`32`で返す。`array`と`string`（バイト数を返す）にだけ使え、`pointer`に使うとコンパイルエラー
+- **添字:** `8`、`32`、`64`のどれでも使える
+- **大きさの上限:** 要素数は`32`の範囲（約21億）まで
 - **n次元:** `array:array:32`のように入れ子にできる。ただし普段は1次元の配列に`a[y * width + x]`で格納することを推奨する
 
 普段は`array:型`を使い、`pointer:型`は低レイヤーやハードウェア操作に使います。
@@ -158,6 +160,7 @@ c:decnum = to:decnum(b) / 3.0;
 d:32 = to:32(c);           // 0の方向に切り捨て
 ```
 
+- **文字列との変換:** `to:string(42)`は`"42"`を返す。`to:32("42")`のように文字列から数への変換は失敗することがあるので、`maybe:32`を返す（失敗なら`null`）
 - **範囲外:** 変換後の型に入らない値は、オーバーフローと同じ扱い（値が決まっていればコンパイルエラー、決まらなければ実行時に停止）
 - **`to`:** キーワード。`to:32`の`:`で宣言と見分けるので、変数名には使えない
 
@@ -208,6 +211,7 @@ function nothing main() {
 - 戻り値の型を指定した関数で`return`を忘れたらコンパイルエラー
 - `nothing`の関数で値を`return`したらコンパイルエラー
 - `main`の戻り値の型は`32`か`nothing`。`32`なら戻り値をプログラムの終了コードにする
+- `main`は引数なしか、`main(args:array:string)`のどちらか。`args`にはコマンドライン引数が入る（`args[0]`はプログラム自身の名前）
 
 ### 制御構文
 
@@ -359,7 +363,7 @@ sort(nums.items, less32);
 
 ### グローバル変数と固定値
 
-関数の外に書いた宣言はグローバル変数になります。値を変えないものには`immutable`を付け、代入はコンパイルエラーにします。
+関数の外に書いた宣言はグローバル変数になります。値を変えないものには`immutable`を付け、代入はコンパイルエラーにします。グローバル変数の初期値は、`80`や`WIDTH * 2`のように値がコンパイル時に決まる式だけです。
 
 ```
 count:32 = 0;
@@ -368,7 +372,7 @@ immutable WIDTH:32 = 80;
 
 ### importとexport
 
-`import`で別ファイルを読み込みます。ほかのファイルから使えるのは、`export`を付けたトップレベルの関数とグローバル変数だけです。
+`import`で別ファイルを読み込みます。ほかのファイルから使えるのは、`export`を付けたトップレベルの関数、グローバル変数、`struct`だけです。
 
 `import`したものは、名前空間（ライブラリの名前）を前に付けて使います。別々のライブラリに同じ名前の関数があってもぶつかりません。
 
@@ -414,7 +418,7 @@ extern function 32 close(fd:32);
 
 | 標準ライブラリ | 中身 | 用意する時期 |
 | --- | --- | --- |
-| `stdio` | `print`、`put`、`read_file`、`write_file` | 手順5 |
+| `stdio` | `print`、`put`、`read_line`、`read_file`、`write_file`、`last_error` | 手順5 |
 | `math` | `sqrt`、`sin`など | 手順6 |
 | `socket` | ソケット | 必要になったとき |
 | `bignum` | 大きな整数 | 手順8 |
@@ -427,6 +431,10 @@ export function 32 add(a:32, b:32) {
 }
 
 export count:32 = 0;
+
+export struct Request {
+    path:string;
+}
 ```
 
 ### エラー表示
@@ -518,14 +526,27 @@ if (b[0] == 'A') {
 | 自作CPU上のCライブラリ | `putchar`など |
 | OSなしの実機 | UARTのレジスタへ直接書き込み |
 
+`stdio.read_line()`はキーボード（標準入力）から1行読み、末尾の改行を除いた`maybe:string`を返します。入力の終わりなら`null`です。
+
 ### ファイル
 
-`stdio.read_file(path)`はファイルの内容を`string`で返し、`stdio.write_file(path, text)`は内容を書き込みます。
+`stdio.read_file(path)`はファイルの内容を`maybe:string`で返し、`stdio.write_file(path, text)`は内容を書き込んで、成功したかを`bool`で返します。
 
 ```
-text:string = stdio.read_file("input.txt");
-stdio.write_file("output.txt", text);
+text:maybe:string = stdio.read_file("input.txt");
+if (text != null) {
+    stdio.write_file("output.txt", text);
+} else {
+    stdio.print(stdio.last_error());
+}
 ```
+
+### 失敗の扱い
+
+失敗することがある関数は、`maybe`を付けた型で返し、失敗したら`null`を返します。`maybe`は確かめずに使うとコンパイルエラーなので、失敗の確認を忘れることがありません。
+
+- **理由:** 直前の失敗の理由は`stdio.last_error()`で`string`として取れる（「ファイルがありません」など）
+- **例外:** 例外の仕組みはない
 
 ### ライブラリ
 
