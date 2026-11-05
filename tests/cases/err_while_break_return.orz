@@ -1,0 +1,10 @@
+// error: 関数 `f` が値を返さずに終わることがあります
+function 32 f() {
+    while (true) {
+        break;
+    }
+}
+
+function 32 main() {
+    return f();
+}

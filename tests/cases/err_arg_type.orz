@@ -1,0 +1,8 @@
+// error: `32` 型の値が必要ですが、この式は `bool` 型です
+function 32 double(a:32) {
+    return a * 2;
+}
+
+function 32 main() {
+    return double(true);
+}

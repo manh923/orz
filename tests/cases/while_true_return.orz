@@ -1,0 +1,15 @@
+// exit: 8
+// break のない while (true) は抜けないので、後ろに return がなくてよい
+function 32 find() {
+    i:32 = 0;
+    while (true) {
+        i = i + 1;
+        if (i * i > 50) {
+            return i;
+        }
+    }
+}
+
+function 32 main() {
+    return find();
+}

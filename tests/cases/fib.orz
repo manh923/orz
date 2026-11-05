@@ -1,0 +1,11 @@
+// exit: 55
+function 32 fib(n:32) {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function 32 main() {
+    return fib(10);
+}

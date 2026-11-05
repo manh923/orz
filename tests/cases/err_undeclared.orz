@@ -1,0 +1,4 @@
+// error: `y` という変数はありません
+function 32 main() {
+    return y;
+}

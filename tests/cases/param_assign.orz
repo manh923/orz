@@ -1,0 +1,13 @@
+// exit: 55
+function 32 sum_to(n:32) {
+    s:32 = 0;
+    while (n > 0) {
+        s = s + n;
+        n = n - 1;
+    }
+    return s;
+}
+
+function 32 main() {
+    return sum_to(10);
+}

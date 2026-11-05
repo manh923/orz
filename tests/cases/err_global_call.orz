@@ -1,0 +1,10 @@
+// error: グローバル変数の初期値では、関数を呼べません
+g:32 = f();
+
+function 32 f() {
+    return 1;
+}
+
+function 32 main() {
+    return g;
+}

@@ -3,7 +3,8 @@
 //! ファイルの先頭のコメントで、期待する結果を書く。
 //!   // exit: 3          正しく動いて、終了コードが 3。定数の畳み込みあり・なしの両方で試す
 //!   // error: 文字列     コンパイルエラーになり、その文字列が表示される
-//!   // runtime: 文字列   定数の畳み込みを切ると実行時エラーになり、その文字列が表示される
+//!   // runtime: 文字列   実行時エラーになり、その文字列が表示される
+//!   // flags: --no-fold   定数の畳み込みを切ってコンパイルする（実行時の検査を試すため）
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,7 +73,9 @@ fn check(case: &Path, dir: &Path) -> Result<(), String> {
             Err(e) => return Err(format!("エラーの内容が違います:\n{}", e)),
         }
     } else if let Some(msg) = header(&src, "runtime:") {
-        let (code, err) = build_and_run(case, dir, true).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
+        let no_fold = header(&src, "flags:").is_some_and(|f| f.contains("--no-fold"));
+        let (code, err) =
+            build_and_run(case, dir, no_fold).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
         if code != PANIC_EXIT_CODE || !err.contains(&msg) || !err.starts_with("実行時エラー: ") {
             return Err(format!("終了コード {}、標準エラー出力:\n{}", code, err));
         }

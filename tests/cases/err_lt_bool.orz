@@ -1,0 +1,4 @@
+// error: `bool` は `<` で大小を比べられません
+function nothing main() {
+    b:bool = true < false;
+}

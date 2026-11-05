@@ -1,0 +1,8 @@
+// error: 関数 `hello` は値を返さない（`nothing`）ので、値としては使えません
+function nothing hello() {
+}
+
+function 32 main() {
+    x:32 = hello();
+    return x;
+}

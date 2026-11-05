@@ -1,0 +1,12 @@
+// exit: 12
+// 式は左から順に計算する（bump() の前に読んだ g は 1 のまま）
+g:32 = 1;
+
+function 32 bump() {
+    g = g + 10;
+    return 0;
+}
+
+function 32 main() {
+    return g + bump() + g;
+}

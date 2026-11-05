@@ -1,4 +1,4 @@
-// error: 比較 `<` の結果は `bool`
+// error: `32` 型の値が必要ですが、この式は `bool` 型です
 function 32 main() {
     return 1 < 2;
 }

@@ -1,4 +1,5 @@
-// runtime: rt_overflow.orz:3: 計算の結果が 32 の範囲（-2147483648〜2147483647）を超えました
+// runtime: rt_overflow.orz:4: 計算の結果が 32 の範囲（-2147483648〜2147483647）を超えました
+// flags: --no-fold
 function 32 main() {
     return 2147483647 + 1;
 }

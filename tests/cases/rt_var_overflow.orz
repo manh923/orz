@@ -1,0 +1,6 @@
+// runtime: rt_var_overflow.orz:4: 計算の結果が 32 の範囲
+function 32 main() {
+    x:32 = 2147483647;
+    x = x + 1;
+    return 0;
+}

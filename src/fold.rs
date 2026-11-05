@@ -2,28 +2,53 @@
 //!
 //! 値がコンパイル時に決まる計算は、ここで計算してしまう。
 //! オーバーフローや 0 除算などがコンパイル時にわかれば、ここでコンパイルエラーにする。
+//!
+//! 一時変数は 1 回だけ代入され、使う場所より前で必ず代入されているので、
+//! 前から順に見て「値のわかった一時変数」を覚えていくだけでよい。
+//! 変数（`Var`・`Global`）は何度も書き換わるので、値がわかったものとしては扱わない。
 
 use std::collections::HashMap;
 
 use crate::ast::IntTy;
-use crate::ir::{self, Inst, IrBinOp, Operand, Trap};
+use crate::ir::{self, CmpOp, Inst, IrBinOp, Operand, Trap};
 use crate::source::{Diag, Span};
 
 pub fn fold(prog: &mut ir::Program) -> Result<(), Diag> {
     for f in &mut prog.funcs {
-        fold_func(f)?;
+        fold_insts(&mut f.insts)?;
     }
     Ok(())
 }
 
-fn fold_func(f: &mut ir::Function) -> Result<(), Diag> {
-    let mut known: HashMap<u32, i64> = HashMap::new();
-    let subst = |known: &HashMap<u32, i64>, op: Operand| match op {
+/// グローバル変数の初期値の計算。`result` の値がコンパイル時にわかれば返す。
+pub fn fold_const(insts: &mut [Inst], result: Operand) -> Result<Option<i64>, Diag> {
+    let known = fold_insts(insts)?;
+    Ok(match result {
+        Operand::Imm(v) => Some(v),
+        Operand::Temp(t) => known.get(&t).copied(),
+        _ => None,
+    })
+}
+
+fn subst(known: &HashMap<u32, i64>, op: Operand) -> Operand {
+    match op {
         Operand::Temp(t) => known.get(&t).map(|v| Operand::Imm(*v)).unwrap_or(op),
-        imm => imm,
-    };
-    for inst in &mut f.insts {
-        match inst {
+        other => other,
+    }
+}
+
+/// 命令の置き換え方。
+enum Repl {
+    /// 値がわかった：`dst = 値` にする。
+    Const(u32, i64),
+    /// 分岐の向きがわかった：`goto` にする。
+    Jump(u32),
+}
+
+fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
+    let mut known: HashMap<u32, i64> = HashMap::new();
+    for inst in insts.iter_mut() {
+        let replaced = match inst {
             Inst::Bin {
                 dst,
                 op,
@@ -38,35 +63,47 @@ fn fold_func(f: &mut ir::Function) -> Result<(), Diag> {
                 if let Operand::Imm(bv) = *b {
                     check_rhs(*op, *ty, bv, *span)?;
                 }
-                if let (Operand::Imm(av), Operand::Imm(bv)) = (*a, *b) {
-                    let v = eval_bin(*op, *ty, av, bv).map_err(|t| compile_trap(t, *ty, *span))?;
-                    known.insert(*dst, v);
-                    *inst = Inst::Copy {
-                        dst: *dst,
-                        src: Operand::Imm(v),
-                    };
+                match (*a, *b) {
+                    (Operand::Imm(av), Operand::Imm(bv)) => {
+                        let v = eval_bin(*op, *ty, av, bv).map_err(|t| compile_trap(t, *ty, *span))?;
+                        Some(Repl::Const(*dst, v))
+                    }
+                    _ => None,
                 }
             }
             Inst::Neg { dst, ty, a, span } => {
                 *a = subst(&known, *a);
-                if let Operand::Imm(av) = *a {
-                    let v = eval_bin(IrBinOp::Sub, *ty, 0, av).map_err(|t| compile_trap(t, *ty, *span))?;
-                    known.insert(*dst, v);
-                    *inst = Inst::Copy {
-                        dst: *dst,
-                        src: Operand::Imm(v),
-                    };
+                match *a {
+                    Operand::Imm(av) => {
+                        let v =
+                            eval_bin(IrBinOp::Sub, *ty, 0, av).map_err(|t| compile_trap(t, *ty, *span))?;
+                        Some(Repl::Const(*dst, v))
+                    }
+                    _ => None,
                 }
             }
             Inst::Not { dst, ty, a } => {
                 *a = subst(&known, *a);
-                if let Operand::Imm(av) = *a {
-                    let v = wrap(*ty, !av);
-                    known.insert(*dst, v);
-                    *inst = Inst::Copy {
-                        dst: *dst,
-                        src: Operand::Imm(v),
-                    };
+                match *a {
+                    Operand::Imm(av) => Some(Repl::Const(*dst, wrap(*ty, !av))),
+                    _ => None,
+                }
+            }
+            Inst::BoolNot { dst, a } => {
+                *a = subst(&known, *a);
+                match *a {
+                    Operand::Imm(av) => Some(Repl::Const(*dst, (av == 0) as i64)),
+                    _ => None,
+                }
+            }
+            Inst::Cmp { dst, op, a, b } => {
+                *a = subst(&known, *a);
+                *b = subst(&known, *b);
+                match (*a, *b) {
+                    (Operand::Imm(av), Operand::Imm(bv)) => {
+                        Some(Repl::Const(*dst, eval_cmp(*op, av, bv) as i64))
+                    }
+                    _ => None,
                 }
             }
             Inst::Copy { dst, src } => {
@@ -74,12 +111,44 @@ fn fold_func(f: &mut ir::Function) -> Result<(), Diag> {
                 if let Operand::Imm(v) = *src {
                     known.insert(*dst, v);
                 }
+                None
             }
-            Inst::Ret(Some(v)) => *v = subst(&known, *v),
-            Inst::Ret(None) => {}
+            Inst::Store { src, .. } => {
+                *src = subst(&known, *src);
+                None
+            }
+            Inst::Call { args, .. } => {
+                for a in args.iter_mut() {
+                    *a = subst(&known, *a);
+                }
+                None
+            }
+            Inst::Branch { cond, then, els } => {
+                *cond = subst(&known, *cond);
+                match *cond {
+                    Operand::Imm(c) => Some(Repl::Jump(if c != 0 { *then } else { *els })),
+                    _ => None,
+                }
+            }
+            Inst::Ret(Some(v)) => {
+                *v = subst(&known, *v);
+                None
+            }
+            Inst::Ret(None) | Inst::Label(_) | Inst::Jump(_) => None,
+        };
+        match replaced {
+            Some(Repl::Const(dst, v)) => {
+                known.insert(dst, v);
+                *inst = Inst::Copy {
+                    dst,
+                    src: Operand::Imm(v),
+                };
+            }
+            Some(Repl::Jump(l)) => *inst = Inst::Jump(l),
+            None => {}
         }
     }
-    Ok(())
+    Ok(known)
 }
 
 fn compile_trap(t: Trap, ty: IntTy, span: Span) -> Diag {
@@ -111,6 +180,17 @@ fn in_range(ty: IntTy, v: i128) -> Result<i64, Trap> {
         Err(Trap::Overflow)
     } else {
         Ok(v as i64)
+    }
+}
+
+pub fn eval_cmp(op: CmpOp, a: i64, b: i64) -> bool {
+    match op {
+        CmpOp::Lt => a < b,
+        CmpOp::Gt => a > b,
+        CmpOp::Le => a <= b,
+        CmpOp::Ge => a >= b,
+        CmpOp::Eq => a == b,
+        CmpOp::Ne => a != b,
     }
 }
 

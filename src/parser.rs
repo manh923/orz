@@ -97,12 +97,15 @@ impl Parser {
     fn item(&mut self) -> PResult<Item> {
         match self.peek() {
             Tok::Kw(Kw::Function) => Ok(Item::Func(self.func()?)),
-            Tok::Ident(_) => Ok(Item::Global(self.decl()?)),
+            Tok::Ident(_) => Ok(Item::Global(self.decl(false)?)),
             Tok::Kw(Kw::Struct) => Err(self.not_yet("`struct`")),
             Tok::Kw(Kw::Import) => Err(self.not_yet("`import`")),
             Tok::Kw(Kw::Export) => Err(self.not_yet("`export`")),
             Tok::Kw(Kw::Extern) => Err(self.not_yet("`extern`")),
-            Tok::Kw(Kw::Immutable) => Err(self.not_yet("`immutable`")),
+            Tok::Kw(Kw::Immutable) => {
+                self.bump();
+                Ok(Item::Global(self.decl(true)?))
+            }
             _ => Err(self.unexpected("関数（`function`）かグローバル変数の宣言")),
         }
     }
@@ -277,7 +280,7 @@ impl Parser {
         self.expect(Tok::Semi, "文の終わりの")
     }
 
-    fn decl(&mut self) -> PResult<Decl> {
+    fn decl(&mut self, immutable: bool) -> PResult<Decl> {
         let (name, name_span) = self.ident("変数の名前")?;
         if self.peek() != &Tok::Colon {
             return Err(
@@ -301,13 +304,18 @@ impl Parser {
             name_span,
             ty,
             init,
+            immutable,
         })
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.span();
         let kind = match self.peek() {
-            Tok::Ident(_) if self.peek_at(1) == &Tok::Colon => StmtKind::Decl(self.decl()?),
+            Tok::Ident(_) if self.peek_at(1) == &Tok::Colon => StmtKind::Decl(self.decl(false)?),
+            Tok::Kw(Kw::Immutable) => {
+                return Err(Diag::new(lo, "`immutable` はグローバル変数にだけ付けられます")
+                    .hint("関数の外（ファイルのいちばん外側）で宣言してください"))
+            }
             Tok::Kw(Kw::If) => return self.if_stmt(),
             Tok::Kw(Kw::While) => {
                 self.bump();
@@ -371,6 +379,10 @@ impl Parser {
         }
         self.bump();
         let e = self.expr()?;
+        if self.peek() == &Tok::Assign {
+            return Err(Diag::new(self.span(), "条件の中に `=`（代入）は書けません")
+                .hint("等しいかを比べるときは `==` と書きます"));
+        }
         self.expect(Tok::RParen, "条件の終わりの")?;
         Ok(e)
     }

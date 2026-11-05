@@ -1,0 +1,6 @@
+// error: 条件の中に `=`（代入）は書けません
+function nothing main() {
+    x:32 = 0;
+    if (x = 1) {
+    }
+}

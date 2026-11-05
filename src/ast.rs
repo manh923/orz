@@ -96,6 +96,8 @@ pub struct Decl {
     pub name_span: Span,
     pub ty: TypeExpr,
     pub init: Expr,
+    /// `immutable` が付いているか（グローバル変数だけ）。
+    pub immutable: bool,
 }
 
 #[derive(Debug)]

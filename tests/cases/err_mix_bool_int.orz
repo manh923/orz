@@ -1,0 +1,5 @@
+// error: `32` 型の値が必要ですが、この式は `bool` 型です
+function nothing main() {
+    x:32 = 1;
+    b:bool = x and true;
+}
