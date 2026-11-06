@@ -1,0 +1,9 @@
+// error: 構造体 `Point` のフィールドは 2 個ですが、1 個書かれています
+struct Point {
+    x:32;
+    y:32;
+}
+
+function nothing main() {
+    p:Point = Point(1);
+}

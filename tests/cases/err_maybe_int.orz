@@ -1,4 +1,0 @@
-// error: `maybe:32`（整数などに付けた maybe）はまだ実装していません（実装の手順 6 で対応）
-function nothing main() {
-    x:maybe:32 = null;
-}

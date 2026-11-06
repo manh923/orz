@@ -1,0 +1,6 @@
+// error: modules/broken.orz:3:1: エラー: 文の終わりの `;`が必要ですが
+import "modules/broken.orz";
+
+function 32 main() {
+    return broken.f();
+}

@@ -1,0 +1,17 @@
+3
+5
+Point(x: 5, y: 2)
+Point(x: 7, y: 2)
+true
+false
+15
+6
+Node(value: 1, next: Node(value: 2, next: Node(value: 3, next: null)))
+1
+Person(name: "花子", age: 21, height: 160.0, tags: [], best: Person(name: "太郎", age: 20, height: 170.5, tags: ["a", "b"], best: null))
+["c"]
+8
+8
+[Point(x: 1, y: 1), Point(x: 2, y: 9)]
+[Point(x: 15, y: 2), null]
+11

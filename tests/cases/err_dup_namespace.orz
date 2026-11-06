@@ -1,0 +1,7 @@
+// error: 名前空間 `geom` が 2 回 import されています
+import "modules/geom.orz";
+import "modules/geom.orz";
+
+function 32 main() {
+    return 0;
+}

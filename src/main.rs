@@ -82,17 +82,14 @@ fn usage_exit() -> ! {
 
 /// ソースからアセンブリを作る。エラーなら表示して終わる。
 fn compile(path: &Path, no_fold: bool) -> String {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{} を読めません: {}", path.display(), e);
-            exit(1);
-        }
+    let mut files = Files {
+        srcs: Vec::new(),
+        paths: Vec::new(),
+        progs: Vec::new(),
     };
-    let src = SourceFile::new(path.display().to_string(), text);
-    let result = lexer::lex(&src.text)
-        .and_then(|l| parser::parse(l.tokens))
-        .and_then(|p| sema::lower(&p))
+    let result = files
+        .load_all(path)
+        .and_then(|_| sema::lower(&files.progs))
         .and_then(|mut ir| {
             if !no_fold {
                 fold::fold(&mut ir)?;
@@ -100,11 +97,87 @@ fn compile(path: &Path, no_fold: bool) -> String {
             Ok(ir)
         });
     match result {
-        Ok(ir) => x86::emit(&ir, &src),
+        Ok(ir) => x86::emit(&ir, &files.srcs),
         Err(d) => {
-            eprint!("{}", d.render(&src));
+            let src = files.srcs.get(d.span.file as usize).unwrap_or(&files.srcs[0]);
+            eprint!("{}", d.render(src));
             exit(1);
         }
+    }
+}
+
+/// 読み込んだファイル。番号は `Span::file` と同じ。0 番が最初に渡されたファイル。
+struct Files {
+    srcs: Vec<SourceFile>,
+    /// 同じファイルを 2 回読まないための、正規化したパス。
+    paths: Vec<PathBuf>,
+    progs: Vec<ast::Program>,
+}
+
+impl Files {
+    /// 最初のファイルと、そこから import されるファイルをすべて読む。
+    fn load_all(&mut self, root: &Path) -> Result<(), source::Diag> {
+        let text = match std::fs::read_to_string(root) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{} を読めません: {}", root.display(), e);
+                exit(1);
+            }
+        };
+        let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.add(root.display().to_string(), canon, text)?;
+        let mut i = 0;
+        while i < self.progs.len() {
+            let dir = self.paths[i].parent().map(Path::to_path_buf).unwrap_or_default();
+            // 読む順に関係なく、import に読み込んだファイルの番号を書き込む。
+            let mut resolved = Vec::new();
+            for (k, item) in self.progs[i].items.iter().enumerate() {
+                let ast::Item::Import(imp) = item else { continue };
+                let ast::ImportTarget::File(rel) = &imp.target else {
+                    continue;
+                };
+                let full = dir.join(rel);
+                let canon = full.canonicalize().map_err(|_| {
+                    source::Diag::new(imp.span, format!("ファイル `{}` が見つかりません", rel))
+                        .hint("パスは、import を書いたファイルから見た場所で書きます")
+                })?;
+                resolved.push((k, canon, imp.span, self.display_name(i, rel)));
+            }
+            for (k, canon, span, name) in resolved {
+                let index = match self.paths.iter().position(|p| *p == canon) {
+                    Some(j) => j,
+                    None => {
+                        let text = std::fs::read_to_string(&canon).map_err(|e| {
+                            source::Diag::new(span, format!("ファイル `{}` を読めません: {}", name, e))
+                        })?;
+                        self.add(name, canon, text)?
+                    }
+                };
+                if let ast::Item::Import(imp) = &mut self.progs[i].items[k] {
+                    imp.resolved = Some(index);
+                }
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// エラーの表示に使う名前（最初のファイルのあるフォルダから見たパス）。
+    fn display_name(&self, from: usize, rel: &str) -> String {
+        let base = Path::new(&self.srcs[from].name)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        base.join(rel).display().to_string()
+    }
+
+    fn add(&mut self, name: String, canon: PathBuf, text: String) -> Result<usize, source::Diag> {
+        let index = self.srcs.len();
+        self.srcs.push(SourceFile::new(name, text));
+        self.paths.push(canon);
+        let lexed = lexer::lex(&self.srcs[index].text, index as u32)?;
+        self.progs.push(parser::parse(lexed.tokens)?);
+        Ok(index)
     }
 }
 

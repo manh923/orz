@@ -1,16 +1,19 @@
 //! 型の確認と、中間表現への変換。
 //!
-//! 今できるのは手順 5 まで：
-//!   整数（`8`・`32`・`64`）、`bool`、`address`、`string`、`array`、`pointer`、
-//!   `maybe`（string・array・pointer に付けたもの）と `null`、`to:型(x)`、
-//!   変数、`if`、`while`、関数呼び出し、グローバル変数、`import stdio;`。
+//! 今できるのは手順 6 まで：
+//!   整数（`8`・`32`・`64`）、`bool`、`decnum`、`address`、`string`、`array`、`pointer`、構造体、
+//!   `maybe` と `null`、`to:型(x)`、変数、`if`、`while`、関数呼び出し、グローバル変数、
+//!   `import stdio;` と自分のファイルの `import`・`export`。
 //! それ以外の書き方は、構文としては読めても「まだ実装していません」のエラーにする。
+//!
+//! ファイル（モジュール）は 0 番が最初に渡されたファイルで、`Span::file` もこの番号になる。
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::fold;
-use crate::ir::{self, CmpOp, ConstVal, Inst, IrBinOp, Operand, Place, Rt, Width};
+use crate::ir::{self, CmpOp, ConstVal, FOp, Inst, IrBinOp, Operand, Place, Rt, Width};
 use crate::source::{Diag, Span};
 
 /// 値の型。
@@ -19,10 +22,13 @@ pub enum Ty {
     Int(IntTy),
     Address,
     Bool,
+    Dec,
     Str,
     Pointer(Box<Ty>),
     Array(Box<Ty>),
     Maybe(Box<Ty>),
+    /// 構造体（番号と名前）。値はアドレス。
+    Struct(usize, Rc<str>),
     /// `null` そのもの。`maybe` の付いた型にだけ入れられる。
     Null,
 }
@@ -35,16 +41,18 @@ impl Ty {
             Ty::Int(t) => t.name().to_string(),
             Ty::Address => "address".into(),
             Ty::Bool => "bool".into(),
+            Ty::Dec => "decnum".into(),
             Ty::Str => "string".into(),
             Ty::Pointer(t) => format!("pointer:{}", t.name()),
             Ty::Array(t) => format!("array:{}", t.name()),
             Ty::Maybe(t) => format!("maybe:{}", t.name()),
+            Ty::Struct(_, name) => name.to_string(),
             Ty::Null => "null".into(),
         }
     }
 
-    /// 計算に使う整数の型。`address` は 64 として計算する。
-    fn arith(&self) -> Option<IntTy> {
+    /// 整数として計算するときの型。`address` は 64 として計算する。
+    fn int_like(&self) -> Option<IntTy> {
         match self {
             Ty::Int(t) => Some(*t),
             Ty::Address => Some(IntTy::I64),
@@ -52,7 +60,11 @@ impl Ty {
         }
     }
 
-    /// メモリ上の幅（配列の要素や、ポインタの先）。
+    fn is_numeric(&self) -> bool {
+        self.int_like().is_some() || *self == Ty::Dec
+    }
+
+    /// メモリ上の幅（配列の要素、ポインタの先、構造体のフィールド）。
     fn width(&self) -> Width {
         match self {
             Ty::Int(IntTy::U8) | Ty::Bool => Width::W1,
@@ -65,17 +77,27 @@ impl Ty {
         matches!(self, Ty::Maybe(_))
     }
 
-    /// 配列を表示するときの型の説明（ランタイムの orz_rt_put_array が読む）。
+    /// `maybe` を付けたとき、値を箱に入れるか（整数などの値の型）。
+    /// string・array・pointer・構造体はアドレスなので、null を 0 で表せば箱は要らない。
+    fn needs_box(&self) -> bool {
+        matches!(self, Ty::Int(_) | Ty::Bool | Ty::Address | Ty::Dec)
+    }
+
+    /// 表示するときの型の説明（ランタイムの orz_rt_put が読む）。
     fn desc(&self) -> String {
         match self {
             Ty::Int(IntTy::U8) => "b".into(),
             Ty::Int(IntTy::I32) => "i".into(),
             Ty::Int(IntTy::I64) => "l".into(),
             Ty::Bool => "B".into(),
+            Ty::Dec => "d".into(),
             Ty::Str => "s".into(),
-            Ty::Pointer(_) | Ty::Address | Ty::Null => "p".into(),
+            Ty::Pointer(_) | Ty::Address => "p".into(),
+            Ty::Null => "n".into(),
+            Ty::Maybe(t) if t.needs_box() => format!("M{}", t.desc()),
             Ty::Maybe(t) => format!("m{}", t.desc()),
             Ty::Array(t) => format!("[{}", t.desc()),
+            Ty::Struct(i, _) => format!("S{};", i),
         }
     }
 }
@@ -92,32 +114,6 @@ fn not_yet(span: Span, what: &str, step: u32) -> Diag {
     )
 }
 
-/// ソースに書かれた型を確かめる。
-fn resolve_type(t: &TypeExpr) -> Result<Ty, Diag> {
-    Ok(match &t.kind {
-        TypeKind::Int(it) => Ty::Int(*it),
-        TypeKind::Bool => Ty::Bool,
-        TypeKind::String => Ty::Str,
-        TypeKind::Address => Ty::Address,
-        TypeKind::Pointer(inner) => Ty::Pointer(Box::new(resolve_type(inner)?)),
-        TypeKind::Array(inner) => Ty::Array(Box::new(resolve_type(inner)?)),
-        TypeKind::Maybe(inner) => match resolve_type(inner)? {
-            i @ (Ty::Str | Ty::Array(_) | Ty::Pointer(_)) => Ty::Maybe(Box::new(i)),
-            Ty::Maybe(_) => return Err(Diag::new(t.span, "`maybe` は重ねて付けられません")),
-            i => {
-                return Err(not_yet(
-                    t.span,
-                    &format!("`maybe:{}`（整数などに付けた maybe）", i.name()),
-                    6,
-                ))
-            }
-        },
-        TypeKind::Decnum => return Err(not_yet(t.span, "`decnum` 型", 6)),
-        TypeKind::Named(..) => return Err(not_yet(t.span, "構造体", 6)),
-        TypeKind::Function(..) => return Err(not_yet(t.span, "関数ポインタ", 7)),
-    })
-}
-
 /// `import` なしで使える組み込みの関数。
 const BUILTINS: &[&str] = &["allocate", "length", "size", "bytes", "copy", "collect"];
 
@@ -129,6 +125,8 @@ struct FuncSig {
     params: Vec<Ty>,
     /// `None` は `nothing`。
     ret: Option<Ty>,
+    exported: bool,
+    symbol: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,28 +139,59 @@ enum GlobalState {
 
 struct GlobalInfo<'p> {
     decl: &'p Decl,
+    module: usize,
     ty: Ty,
     state: GlobalState,
+    symbol: String,
+}
+
+struct FieldInfo {
+    name: String,
+    ty: Ty,
+    offset: i64,
+}
+
+struct StructInfo<'p> {
+    def: &'p StructDef,
+    module: usize,
+    fields: Vec<FieldInfo>,
+    size: i64,
 }
 
 #[derive(Clone, Copy)]
 enum TopName {
     Func(usize),
     Global(usize),
+    Struct(usize),
 }
 
-/// 標準ライブラリ。
+/// `import` した名前空間が指すもの。
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Module {
+enum ModRef {
     Stdio,
+    File(usize),
+}
+
+struct ModInfo<'p> {
+    /// このファイルで定義した名前。
+    names: HashMap<&'p str, TopName>,
+    /// 名前空間の名前 → import したもの
+    imports: HashMap<String, ModRef>,
+}
+
+/// `ns.name` が指すもの。
+enum Member {
+    Stdio,
+    Func(usize),
+    Global(usize),
+    Struct(usize),
 }
 
 struct Ctx<'p> {
+    mods: Vec<ModInfo<'p>>,
     funcs: Vec<FuncSig>,
     globals: Vec<GlobalInfo<'p>>,
-    names: HashMap<&'p str, TopName>,
-    /// 名前空間の名前 → 標準ライブラリ
-    modules: HashMap<String, Module>,
+    structs: Vec<StructInfo<'p>>,
     strings: Vec<Vec<u8>>,
     string_ids: HashMap<Vec<u8>, u32>,
 }
@@ -178,15 +207,19 @@ impl<'p> Ctx<'p> {
         i
     }
 
-    /// 名前が組み込みの関数・名前空間・関数・グローバル変数とぶつかるか。
-    fn reserved(&self, span: Span, name: &str, what: &str) -> Result<(), Diag> {
+    fn top(&self, m: usize, name: &str) -> Option<TopName> {
+        self.mods[m].names.get(name).copied()
+    }
+
+    /// 名前が組み込みの関数・名前空間とぶつかるか。
+    fn reserved(&self, m: usize, span: Span, name: &str, what: &str) -> Result<(), Diag> {
         if BUILTINS.contains(&name) {
             return Err(Diag::new(
                 span,
                 format!("`{}` は組み込みの関数の名前なので、{}には使えません", name, what),
             ));
         }
-        if self.modules.contains_key(name) {
+        if self.mods[m].imports.contains_key(name) {
             return Err(Diag::new(
                 span,
                 format!(
@@ -197,117 +230,273 @@ impl<'p> Ctx<'p> {
         }
         Ok(())
     }
+
+    fn struct_ty(&self, i: usize) -> Ty {
+        Ty::Struct(i, Rc::from(self.structs[i].def.name.as_str()))
+    }
+
+    /// `ns.name` を探す。ほかのファイルのものは `export` されていなければ使えない。
+    fn member(&self, m: usize, ns: &str, name: &str, span: Span) -> Result<Member, Diag> {
+        let Some(r) = self.mods[m].imports.get(ns).copied() else {
+            return Err(
+                Diag::new(span, format!("`{}` という名前空間はありません", ns)).hint(format!(
+                    "`import {};` か `import \"{}.orz\";` を書き忘れていませんか",
+                    ns, ns
+                )),
+            );
+        };
+        let m2 = match r {
+            ModRef::Stdio => return Ok(Member::Stdio),
+            ModRef::File(m2) => m2,
+        };
+        let (top, exported) = match self.top(m2, name) {
+            Some(t @ TopName::Func(i)) => (t, self.funcs[i].exported),
+            Some(t @ TopName::Global(i)) => (t, self.globals[i].decl.exported),
+            Some(t @ TopName::Struct(i)) => (t, self.structs[i].def.exported),
+            None => return Err(Diag::new(span, format!("`{}` に `{}` はありません", ns, name))),
+        };
+        if !exported {
+            return Err(
+                Diag::new(span, format!("`{}` の `{}` は export されていません", ns, name))
+                    .hint("ほかのファイルから使わせたいなら、定義の前に `export` を付けます"),
+            );
+        }
+        Ok(match top {
+            TopName::Func(i) => Member::Func(i),
+            TopName::Global(i) => Member::Global(i),
+            TopName::Struct(i) => Member::Struct(i),
+        })
+    }
+
+    /// ソースに書かれた型を確かめる。`m` は書かれているファイル。
+    fn resolve_type(&self, m: usize, t: &TypeExpr) -> Result<Ty, Diag> {
+        Ok(match &t.kind {
+            TypeKind::Int(it) => Ty::Int(*it),
+            TypeKind::Bool => Ty::Bool,
+            TypeKind::Decnum => Ty::Dec,
+            TypeKind::String => Ty::Str,
+            TypeKind::Address => Ty::Address,
+            TypeKind::Pointer(inner) => Ty::Pointer(Box::new(self.resolve_type(m, inner)?)),
+            TypeKind::Array(inner) => Ty::Array(Box::new(self.resolve_type(m, inner)?)),
+            TypeKind::Maybe(inner) => match self.resolve_type(m, inner)? {
+                Ty::Maybe(_) => return Err(Diag::new(t.span, "`maybe` は重ねて付けられません")),
+                i => Ty::Maybe(Box::new(i)),
+            },
+            TypeKind::Named(None, name) => match self.top(m, name) {
+                Some(TopName::Struct(i)) => self.struct_ty(i),
+                Some(_) => return Err(Diag::new(t.span, format!("`{}` は型ではありません", name))),
+                None => return Err(unknown_type(t.span, name)),
+            },
+            TypeKind::Named(Some(ns), name) => match self.member(m, ns, name, t.span)? {
+                Member::Struct(i) => self.struct_ty(i),
+                Member::Stdio => {
+                    return Err(Diag::new(
+                        t.span,
+                        format!("`{}` に `{}` という型はありません", ns, name),
+                    ))
+                }
+                _ => return Err(Diag::new(t.span, format!("`{}.{}` は型ではありません", ns, name))),
+            },
+            TypeKind::Function(..) => return Err(not_yet(t.span, "関数ポインタ", 7)),
+        })
+    }
 }
 
-pub fn lower(prog: &Program) -> Result<ir::Program, Diag> {
+fn unknown_type(span: Span, name: &str) -> Diag {
+    let d = Diag::new(span, format!("`{}` という型はありません", name));
+    match name {
+        "int" | "i32" | "i64" | "u8" | "integer" | "long" => d.hint("整数の型は `8`、`32`、`64` です"),
+        "float" | "double" | "f64" | "f32" | "real" => d.hint("小数の型は `decnum` です"),
+        "str" | "String" | "text" => d.hint("文字列の型は `string` です"),
+        "boolean" | "Bool" => d.hint("真偽値の型は `bool` です"),
+        "char" => d.hint("1 文字は長さ 1 の `string`、1 バイトは `8` です"),
+        _ => d,
+    }
+}
+
+/// ファイル名から、名前空間の名前を作る（`lib/util.orz` → `util`）。
+fn file_stem(path: &str) -> String {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.strip_suffix(".orz").unwrap_or(base).to_string()
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `modules[0]` が最初に渡されたファイル。`import` の `resolved` は読み込むときに埋めておく。
+pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     let mut ctx = Ctx {
+        mods: Vec::new(),
         funcs: Vec::new(),
         globals: Vec::new(),
-        names: HashMap::new(),
-        modules: HashMap::new(),
+        structs: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
     };
-    let mut func_asts: Vec<&Func> = Vec::new();
+    let mut func_asts: Vec<(usize, &Func)> = Vec::new();
 
     // 1. import
-    for item in &prog.items {
-        let Item::Import(imp) = item else { continue };
-        let (module, default_name) = match &imp.target {
-            ImportTarget::Std(name) => match name.as_str() {
-                "stdio" => (Module::Stdio, name.clone()),
-                "math" | "socket" | "http" | "bignum" => {
-                    return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
-                        .hint("今使えるのは stdio だけです"))
+    for prog in modules {
+        let mut imports = HashMap::new();
+        for item in &prog.items {
+            let Item::Import(imp) = item else { continue };
+            let (r, default_name) = match &imp.target {
+                ImportTarget::Std(name) => match name.as_str() {
+                    "stdio" => (ModRef::Stdio, name.clone()),
+                    "math" | "socket" | "http" | "bignum" => {
+                        return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
+                            .hint("今使えるのは stdio だけです"))
+                    }
+                    _ => {
+                        return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
+                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます（今使える標準ライブラリは stdio だけです）"))
+                    }
+                },
+                ImportTarget::File(path) => {
+                    (ModRef::File(imp.resolved.expect("読み込むときに埋めてある")), file_stem(path))
                 }
-                _ => {
-                    return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
-                        .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます（今使える標準ライブラリは stdio だけです）"))
-                }
-            },
-            ImportTarget::File(_) => {
-                return Err(Diag::new(imp.span, "自分のファイルの `import` はまだ実装していません")
-                    .hint("今使えるのは `import stdio;` だけです"))
+            };
+            let ns = imp.alias.clone().unwrap_or(default_name);
+            if !is_ident(&ns) {
+                return Err(
+                    Diag::new(imp.span, format!("`{}` は名前空間の名前に使えません", ns))
+                        .hint("`as` で名前を付けてください（例：import \"my-util.orz\" as util;）"),
+                );
             }
-        };
-        let ns = imp.alias.clone().unwrap_or(default_name);
-        if ctx.modules.insert(ns.clone(), module).is_some() {
-            return Err(Diag::new(
-                imp.span,
-                format!("名前空間 `{}` が 2 回 import されています", ns),
-            ));
+            if imports.insert(ns.clone(), r).is_some() {
+                return Err(
+                    Diag::new(imp.span, format!("名前空間 `{}` が 2 回 import されています", ns))
+                        .hint("`as` で別の名前を付けられます"),
+                );
+            }
         }
+        ctx.mods.push(ModInfo {
+            names: HashMap::new(),
+            imports,
+        });
     }
 
     // 2. 名前を集める。関数は定義より前の行からでも呼べる。
-    for item in &prog.items {
-        let (name, span, top) = match item {
-            Item::Func(f) => (&f.name, f.name_span, TopName::Func(func_asts.len())),
-            Item::Global(d) => (&d.name, d.name_span, TopName::Global(ctx.globals.len())),
-            Item::Import(_) => continue,
-        };
-        let what = if matches!(top, TopName::Func(_)) {
-            "関数の名前"
-        } else {
-            "グローバル変数の名前"
-        };
-        ctx.reserved(span, name, what)?;
-        if ctx.names.insert(name, top).is_some() {
-            return Err(
-                Diag::new(span, format!("`{}` という名前が 2 回定義されています", name))
-                    .hint("関数とグローバル変数は、すべて違う名前にします"),
-            );
-        }
-        match item {
-            Item::Func(f) => func_asts.push(f),
-            Item::Global(d) => {
-                let ty = resolve_type(&d.ty)?;
-                ctx.globals.push(GlobalInfo {
-                    decl: d,
-                    ty,
-                    state: GlobalState::Todo,
-                });
+    for (m, prog) in modules.iter().enumerate() {
+        for item in &prog.items {
+            let (name, span, top) = match item {
+                Item::Func(f) => (&f.name, f.name_span, TopName::Func(func_asts.len())),
+                Item::Global(d) => (&d.name, d.name_span, TopName::Global(ctx.globals.len())),
+                Item::Struct(s) => (&s.name, s.name_span, TopName::Struct(ctx.structs.len())),
+                Item::Import(_) => continue,
+            };
+            let what = match top {
+                TopName::Func(_) => "関数の名前",
+                TopName::Global(_) => "グローバル変数の名前",
+                TopName::Struct(_) => "構造体の名前",
+            };
+            ctx.reserved(m, span, name, what)?;
+            if ctx.mods[m].names.insert(name, top).is_some() {
+                return Err(
+                    Diag::new(span, format!("`{}` という名前が 2 回定義されています", name))
+                        .hint("関数、構造体、グローバル変数は、すべて違う名前にします"),
+                );
             }
-            Item::Import(_) => {}
+            match item {
+                Item::Func(f) => func_asts.push((m, f)),
+                Item::Global(d) => ctx.globals.push(GlobalInfo {
+                    decl: d,
+                    module: m,
+                    ty: Ty::Null,
+                    state: GlobalState::Todo,
+                    symbol: format!("orz_g{}_{}", m, d.name),
+                }),
+                Item::Struct(s) => ctx.structs.push(StructInfo {
+                    def: s,
+                    module: m,
+                    fields: Vec::new(),
+                    size: 0,
+                }),
+                Item::Import(_) => {}
+            }
         }
     }
 
-    // 3. 関数の引数と戻り値の型。
-    for f in &func_asts {
+    // 3. 構造体のフィールド。C と同じ並べ方（それぞれの幅にそろえる）。
+    for i in 0..ctx.structs.len() {
+        let (def, m) = (ctx.structs[i].def, ctx.structs[i].module);
+        let mut fields: Vec<FieldInfo> = Vec::new();
+        let mut offset = 0i64;
+        let mut align = 1i64;
+        for f in &def.fields {
+            if fields.iter().any(|x| x.name == f.name) {
+                return Err(Diag::new(
+                    f.span,
+                    format!("フィールド `{}` が 2 つあります", f.name),
+                ));
+            }
+            let ty = ctx.resolve_type(m, &f.ty)?;
+            let w = ty.width().bytes();
+            offset = (offset + w - 1) / w * w;
+            align = align.max(w);
+            fields.push(FieldInfo {
+                name: f.name.clone(),
+                ty,
+                offset,
+            });
+            offset += w;
+        }
+        ctx.structs[i].size = (offset + align - 1) / align * align;
+        ctx.structs[i].fields = fields;
+    }
+    check_struct_cycles(&ctx)?;
+
+    // 4. 関数の引数と戻り値の型。
+    for (m, f) in &func_asts {
+        let m = *m;
         let mut seen = HashSet::new();
         let mut params = Vec::new();
         for p in &f.params {
             if !seen.insert(p.name.as_str()) {
                 return Err(Diag::new(p.span, format!("引数 `{}` が 2 つあります", p.name)));
             }
-            ctx.reserved(p.span, &p.name, "引数の名前")?;
-            if let Some(top) = ctx.names.get(p.name.as_str()) {
-                return Err(top_name_conflict(p.span, &p.name, *top));
+            ctx.reserved(m, p.span, &p.name, "引数の名前")?;
+            if let Some(top) = ctx.top(m, &p.name) {
+                return Err(top_name_conflict(p.span, &p.name, top));
             }
-            params.push(resolve_type(&p.ty)?);
+            params.push(ctx.resolve_type(m, &p.ty)?);
         }
         let ret = match &f.ret {
             RetType::Nothing(_) => None,
-            RetType::Type(t) => Some(resolve_type(t)?),
+            RetType::Type(t) => Some(ctx.resolve_type(m, t)?),
         };
         ctx.funcs.push(FuncSig {
             name: f.name.clone(),
             params,
             ret,
+            exported: f.exported,
+            symbol: format!("orz_f{}_{}", m, f.name),
         });
     }
 
-    // 4. グローバル変数の初期値（コンパイル時に計算する）。
+    // 5. グローバル変数の型と初期値（コンパイル時に計算する）。
+    for i in 0..ctx.globals.len() {
+        ctx.globals[i].ty = ctx.resolve_type(ctx.globals[i].module, &ctx.globals[i].decl.ty)?;
+    }
     for i in 0..ctx.globals.len() {
         ctx.eval_global(i)?;
     }
 
-    // 5. main
-    let main = match ctx.names.get("main") {
-        Some(TopName::Func(i)) => *i,
+    // 6. main（最初に渡されたファイルのもの）
+    let main = match ctx.top(0, "main") {
+        Some(TopName::Func(i)) => i,
         Some(TopName::Global(i)) => {
             return Err(Diag::new(
-                ctx.globals[*i].decl.name_span,
+                ctx.globals[i].decl.name_span,
+                "`main` は関数の名前に使います",
+            ))
+        }
+        Some(TopName::Struct(i)) => {
+            return Err(Diag::new(
+                ctx.structs[i].def.name_span,
                 "`main` は関数の名前に使います",
             ))
         }
@@ -316,18 +505,36 @@ pub fn lower(prog: &Program) -> Result<ir::Program, Diag> {
                 .hint("プログラムは `function nothing main() { ... }` から始まります"))
         }
     };
-    let (main_returns, main_takes_args) = check_main(func_asts[main], &ctx.funcs[main])?;
+    let (main_returns, main_takes_args) = check_main(func_asts[main].1, &ctx.funcs[main])?;
 
-    // 6. 関数の中身。
+    // 7. 関数の中身。
     let mut funcs = Vec::new();
-    for (i, f) in func_asts.iter().enumerate() {
-        funcs.push(lower_func(&mut ctx, i, f)?);
+    for (i, (m, f)) in func_asts.iter().enumerate() {
+        funcs.push(lower_func(&mut ctx, *m, i, f)?);
     }
+
+    let struct_descs = ctx
+        .structs
+        .iter()
+        .map(|s| {
+            // 名前\0 と、フィールドごとに「名前\0 位置:型の説明\0」、最後に \0。
+            let mut d = s.def.name.as_bytes().to_vec();
+            d.push(0);
+            for f in &s.fields {
+                d.extend_from_slice(f.name.as_bytes());
+                d.push(0);
+                d.extend_from_slice(format!("{}:{}", f.offset, f.ty.desc()).as_bytes());
+                d.push(0);
+            }
+            d.push(0);
+            d
+        })
+        .collect();
     let globals = ctx
         .globals
         .iter()
         .map(|g| ir::Global {
-            name: g.decl.name.clone(),
+            symbol: g.symbol.clone(),
             init: match g.state {
                 GlobalState::Done(v) => v,
                 _ => unreachable!("グローバル変数はすべて計算済み"),
@@ -338,16 +545,52 @@ pub fn lower(prog: &Program) -> Result<ir::Program, Diag> {
         funcs,
         globals,
         strings: ctx.strings,
+        struct_descs,
         main: main as u32,
         main_returns,
         main_takes_args,
     })
 }
 
+/// maybe を付けずに自分自身を（ほかの構造体を通しても）含む構造体は、作れないのでエラーにする。
+fn check_struct_cycles(ctx: &Ctx) -> Result<(), Diag> {
+    // 0 = まだ、1 = 調べている途中、2 = 済み
+    fn visit(ctx: &Ctx, i: usize, state: &mut Vec<u8>) -> Result<(), Diag> {
+        if state[i] == 2 {
+            return Ok(());
+        }
+        if state[i] == 1 {
+            let def = ctx.structs[i].def;
+            return Err(Diag::new(
+                def.name_span,
+                format!(
+                    "構造体 `{}` が、maybe を付けずに自分自身を含んでいます（これでは作れません）",
+                    def.name
+                ),
+            )
+            .hint("自分と同じ構造体のフィールドには maybe を付けます（例：next:maybe:Node;）"));
+        }
+        state[i] = 1;
+        for f in &ctx.structs[i].fields {
+            if let Ty::Struct(j, _) = f.ty {
+                visit(ctx, j, state)?;
+            }
+        }
+        state[i] = 2;
+        Ok(())
+    }
+    let mut state = vec![0u8; ctx.structs.len()];
+    for i in 0..ctx.structs.len() {
+        visit(ctx, i, &mut state)?;
+    }
+    Ok(())
+}
+
 fn top_name_conflict(span: Span, name: &str, top: TopName) -> Diag {
     let what = match top {
         TopName::Func(_) => "関数",
         TopName::Global(_) => "グローバル変数",
+        TopName::Struct(_) => "構造体",
     };
     Diag::new(
         span,
@@ -382,7 +625,7 @@ fn check_main(f: &Func, sig: &FuncSig) -> Result<(bool, bool), Diag> {
 impl<'p> Ctx<'p> {
     /// グローバル変数の初期値を計算する。`immutable` の変数を使っていれば、先にそれを計算する。
     fn eval_global(&mut self, i: usize) -> Result<ConstVal, Diag> {
-        let decl = self.globals[i].decl;
+        let (decl, module) = (self.globals[i].decl, self.globals[i].module);
         match self.globals[i].state {
             GlobalState::Done(v) => return Ok(v),
             GlobalState::Busy => {
@@ -399,8 +642,11 @@ impl<'p> Ctx<'p> {
         }
         self.globals[i].state = GlobalState::Busy;
         let ty = self.globals[i].ty.clone();
-        let mut l = FnLower::new(self, None, true);
-        let op = l.expr_as(&decl.init, &ty)?;
+        let mut l = FnLower::new(self, module, None, true);
+        let (op, vt) = l.expr(&decl.init, Some(&ty))?;
+        if !assignable(&ty, &vt) {
+            return Err(mismatch(decl.init.span, &ty, &vt));
+        }
         let mut insts = std::mem::take(&mut l.insts);
         let v = fold::fold_const(&mut insts, op)?.ok_or_else(|| {
             Diag::new(
@@ -408,6 +654,11 @@ impl<'p> Ctx<'p> {
                 "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
             )
         })?;
+        // maybe:32 などに null でない値を入れるときは、箱に入れる。
+        let v = match (&ty, v) {
+            (Ty::Maybe(inner), ConstVal::Int(x)) if inner.needs_box() && vt != Ty::Null => ConstVal::Boxed(x),
+            _ => v,
+        };
         self.globals[i].state = GlobalState::Done(v);
         Ok(v)
     }
@@ -423,6 +674,8 @@ struct Local {
 
 struct FnLower<'c, 'p> {
     ctx: &'c mut Ctx<'p>,
+    /// 今いるファイル。
+    module: usize,
     /// 関数の戻り値の型。`None` は `nothing`。
     ret: Option<Ty>,
     /// グローバル変数の初期値を計算しているところか。
@@ -442,9 +695,9 @@ struct FnLower<'c, 'p> {
     reachable: bool,
 }
 
-fn lower_func(ctx: &mut Ctx, index: usize, f: &Func) -> Result<ir::Function, Diag> {
+fn lower_func(ctx: &mut Ctx, module: usize, index: usize, f: &Func) -> Result<ir::Function, Diag> {
     let sig = ctx.funcs[index].clone();
-    let mut l = FnLower::new(ctx, sig.ret.clone(), false);
+    let mut l = FnLower::new(ctx, module, sig.ret.clone(), false);
     collect_decls(&f.body, &mut l.declared_somewhere);
     l.scopes.push(Vec::new());
     for (p, ty) in f.params.iter().zip(&sig.params) {
@@ -469,6 +722,7 @@ fn lower_func(ctx: &mut Ctx, index: usize, f: &Func) -> Result<ir::Function, Dia
     }
     Ok(ir::Function {
         name: f.name.clone(),
+        symbol: sig.symbol,
         returns_value: sig.ret.is_some(),
         nparams: sig.params.len() as u32,
         insts: l.insts,
@@ -601,27 +855,32 @@ fn mismatch(span: Span, want: &Ty, got: &Ty) -> Diag {
         ),
     );
     match (want, got) {
-        (w, Ty::Maybe(inner)) if **inner == *w => d.hint(
-            "null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます（グローバル変数は、いったんローカル変数に入れてから確かめます）",
-        ),
+        (w, Ty::Maybe(inner)) if **inner == *w => d.hint(MAYBE_HINT),
         (_, Ty::Null) => d.hint("`null` は `maybe` の付いた型にだけ入れられます"),
         (Ty::Bool, Ty::Int(_)) => d.hint("整数を条件に使うなら、`x != 0` のように比べてください"),
-        (Ty::Str, Ty::Int(_) | Ty::Bool | Ty::Address) => d.hint("文字列にするなら `to:string(…)` を使います"),
-        (Ty::Int(a), Ty::Int(_)) => {
-            d.hint(format!("幅の違う整数は混ぜられません。`to:{}(…)` で変換してください", a.name()))
+        (Ty::Str, Ty::Int(_) | Ty::Bool | Ty::Address | Ty::Dec) => {
+            d.hint("文字列にするなら `to:string(…)` を使います")
         }
+        (Ty::Int(a), Ty::Int(_) | Ty::Dec) => d.hint(format!(
+            "型の違う数は混ぜられません。`to:{}(…)` で変換してください",
+            a.name()
+        )),
+        (Ty::Dec, Ty::Int(_)) => d.hint("型の違う数は混ぜられません。`to:decnum(…)` で変換してください"),
         _ => d,
     }
 }
 
+const MAYBE_HINT: &str = "null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます。確かめられるのはローカル変数と引数だけなので、フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから確かめます";
+
 fn maybe_hint(d: Diag) -> Diag {
-    d.hint("null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます")
+    d.hint(MAYBE_HINT)
 }
 
 impl<'c, 'p> FnLower<'c, 'p> {
-    fn new(ctx: &'c mut Ctx<'p>, ret: Option<Ty>, const_ctx: bool) -> Self {
+    fn new(ctx: &'c mut Ctx<'p>, module: usize, ret: Option<Ty>, const_ctx: bool) -> Self {
         FnLower {
             ctx,
+            module,
             ret,
             const_ctx,
             insts: Vec::new(),
@@ -655,6 +914,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
         self.insts.push(i);
     }
 
+    fn top(&self, name: &str) -> Option<TopName> {
+        self.ctx.top(self.module, name)
+    }
+
+    fn is_namespace(&self, name: &str) -> bool {
+        self.lookup(name).is_none() && self.ctx.mods[self.module].imports.contains_key(name)
+    }
+
     /// ランタイムの関数を呼ぶ。グローバル変数の初期値では呼べない。
     fn rt(&mut self, func: Rt, args: Vec<Operand>, span: Span, returns: bool) -> Result<Option<u32>, Diag> {
         if self.const_ctx {
@@ -662,7 +929,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 span,
                 "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
             )
-            .hint("文字列の連結や配列づくりは、関数の中で行います"));
+            .hint("文字列の連結や配列・構造体づくりは、関数の中で行います"));
         }
         let dst = if returns { Some(self.temp()) } else { None };
         self.emit(Inst::CallRt {
@@ -672,6 +939,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
             span,
         });
         Ok(dst)
+    }
+
+    fn rt_value(&mut self, func: Rt, args: Vec<Operand>, span: Span) -> Result<Operand, Diag> {
+        Ok(Operand::Temp(self.rt(func, args, span, true)?.unwrap()))
     }
 
     fn lookup(&self, name: &str) -> Option<&Local> {
@@ -704,9 +975,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("外側の変数と同じ名前は付けられません。別の名前にしてください"),
             );
         }
-        self.ctx.reserved(span, name, "変数の名前")?;
-        if let Some(top) = self.ctx.names.get(name) {
-            return Err(top_name_conflict(span, name, *top));
+        self.ctx.reserved(self.module, span, name, "変数の名前")?;
+        if let Some(top) = self.top(name) {
+            return Err(top_name_conflict(span, name, top));
         }
         let var = self.new_var();
         self.scopes.last_mut().unwrap().push(Local {
@@ -715,6 +986,16 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ty,
         });
         Ok(var)
+    }
+
+    /// `from` 型の値を `to` 型の場所に入れる形にする（maybe:32 などなら箱に入れる）。
+    fn coerce(&mut self, v: Operand, from: &Ty, to: &Ty, span: Span) -> Result<Operand, Diag> {
+        match to {
+            Ty::Maybe(inner) if inner.needs_box() && **inner == *from => {
+                self.rt_value(Rt::Box, vec![v], span)
+            }
+            _ => Ok(v),
+        }
     }
 
     // ---------------- maybe の絞り込み ----------------
@@ -786,12 +1067,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diag> {
         match &s.kind {
             StmtKind::Decl(d) => {
-                let ty = resolve_type(&d.ty)?;
+                let ty = self.ctx.resolve_type(self.module, &d.ty)?;
                 // 初期値の中では、まだ自分自身は使えない。
-                let (v, vt) = self.expr(&d.init, Some(&ty))?;
-                if !assignable(&ty, &vt) {
-                    return Err(mismatch(d.init.span, &ty, &vt));
-                }
+                let (v, vt) = self.expr_to(&d.init, &ty)?;
                 let var = self.declare(&d.name, d.name_span, ty.clone())?;
                 self.emit(Inst::Store {
                     place: Place::Var(var),
@@ -852,22 +1130,28 @@ impl<'c, 'p> FnLower<'c, 'p> {
         Ok(())
     }
 
+    /// グローバル変数への代入先。immutable なら代入できない。
+    fn global_place(&self, i: usize, span: Span, name: &str) -> Result<(Place, Ty), Diag> {
+        let g = &self.ctx.globals[i];
+        if g.decl.immutable {
+            return Err(Diag::new(
+                span,
+                format!("`{}` は immutable なので、値を変えられません", name),
+            ));
+        }
+        Ok((Place::Global(i as u32), g.ty.clone()))
+    }
+
     fn assign(&mut self, target: &Expr, value: &Expr) -> Result<(), Diag> {
-        match &target.kind {
+        let (place, ty, local) = match &target.kind {
             ExprKind::Var(name) => {
-                let (place, ty, local) = if let Some(l) = self.lookup(name) {
+                if let Some(l) = self.lookup(name) {
                     (Place::Var(l.var), l.ty.clone(), Some(l.var))
                 } else {
-                    match self.ctx.names.get(name.as_str()) {
+                    match self.top(name) {
                         Some(TopName::Global(i)) => {
-                            let g = &self.ctx.globals[*i];
-                            if g.decl.immutable {
-                                return Err(Diag::new(
-                                    target.span,
-                                    format!("`{}` は immutable なので、値を変えられません", name),
-                                ));
-                            }
-                            (Place::Global(*i as u32), g.ty.clone(), None)
+                            let (p, t) = self.global_place(i, target.span, name)?;
+                            (p, t, None)
                         }
                         Some(TopName::Func(_)) => {
                             return Err(Diag::new(
@@ -875,18 +1159,43 @@ impl<'c, 'p> FnLower<'c, 'p> {
                                 format!("`{}` は関数なので、代入できません", name),
                             ))
                         }
+                        Some(TopName::Struct(_)) => {
+                            return Err(Diag::new(
+                                target.span,
+                                format!("`{}` は構造体なので、代入できません", name),
+                            ))
+                        }
                         None => return Err(self.unknown_var(target.span, name)),
                     }
-                };
-                let (v, vt) = self.expr(value, Some(&ty))?;
-                if !assignable(&ty, &vt) {
-                    return Err(mismatch(value.span, &ty, &vt));
                 }
-                self.emit(Inst::Store { place, src: v });
-                if let Some(var) = local {
-                    self.after_store(var, &ty, &vt);
+            }
+            ExprKind::Field(obj, f) => {
+                if let ExprKind::Var(ns) = &obj.kind {
+                    if self.is_namespace(ns) {
+                        let (p, t) = match self.ctx.member(self.module, ns, f, target.span)? {
+                            Member::Global(i) => {
+                                self.global_place(i, target.span, &format!("{}.{}", ns, f))?
+                            }
+                            _ => {
+                                return Err(Diag::new(
+                                    target.span,
+                                    format!("`{}.{}` には代入できません", ns, f),
+                                ))
+                            }
+                        };
+                        let v = self.expr_as(value, &t)?;
+                        self.emit(Inst::Store { place: p, src: v });
+                        return Ok(());
+                    }
                 }
-                Ok(())
+                let (addr, fty) = self.field_addr(target, obj, f)?;
+                let v = self.expr_as(value, &fty)?;
+                self.emit(Inst::StoreMem {
+                    addr,
+                    src: v,
+                    width: fty.width(),
+                });
+                return Ok(());
             }
             ExprKind::Index(base, index) => {
                 let (addr, elem) = self.elem_addr(target, base, index)?;
@@ -896,12 +1205,19 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     src: v,
                     width: elem.width(),
                 });
-                Ok(())
+                return Ok(());
             }
-            ExprKind::Field(..) => Err(not_yet(target.span, "フィールドへの代入", 6)),
-            _ => Err(Diag::new(target.span, "ここには代入できません")
-                .hint("`=` の左には変数か `a[i]` を書きます。比べるなら `==` です")),
+            _ => {
+                return Err(Diag::new(target.span, "ここには代入できません")
+                    .hint("`=` の左には変数、`a[i]`、`p.x` を書きます。比べるなら `==` です"))
+            }
+        };
+        let (v, vt) = self.expr_to(value, &ty)?;
+        self.emit(Inst::Store { place, src: v });
+        if let Some(var) = local {
+            self.after_store(var, &ty, &vt);
         }
+        Ok(())
     }
 
     fn if_stmt(&mut self, cond: &Expr, then: &Block, els: Option<&Else>) -> Result<(), Diag> {
@@ -1006,13 +1322,18 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     // ---------------- 式 ----------------
 
-    /// 式を `ty` 型の値として計算する。入れられない型ならエラー。
-    fn expr_as(&mut self, e: &Expr, ty: &Ty) -> Result<Operand, Diag> {
+    /// 式を `ty` 型の場所に入れる値として計算する。（入れる形にした値, 式そのものの型）
+    fn expr_to(&mut self, e: &Expr, ty: &Ty) -> Result<(Operand, Ty), Diag> {
         let (v, t) = self.expr(e, Some(ty))?;
         if !assignable(ty, &t) {
             return Err(mismatch(e.span, ty, &t));
         }
-        Ok(v)
+        let v = self.coerce(v, &t, ty, e.span)?;
+        Ok((v, t))
+    }
+
+    fn expr_as(&mut self, e: &Expr, ty: &Ty) -> Result<Operand, Diag> {
+        Ok(self.expr_to(e, ty)?.0)
     }
 
     /// 式の型を、計算せずに調べる。整数リテラルだけの式など、文脈で決まるものは `None`。
@@ -1021,13 +1342,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Bool(_) => Some(Ty::Bool),
             ExprKind::Str(_) => Some(Ty::Str),
             ExprKind::Char(_) => Some(Ty::Int(IntTy::U8)),
+            ExprKind::Float(_) => Some(Ty::Dec),
             ExprKind::Null => Some(Ty::Null),
             ExprKind::Var(name) => {
                 if let Some(l) = self.lookup(name) {
                     return Some(self.local_type(l));
                 }
-                match self.ctx.names.get(name.as_str()) {
-                    Some(TopName::Global(i)) => Some(self.ctx.globals[*i].ty.clone()),
+                match self.top(name) {
+                    Some(TopName::Global(i)) => Some(self.ctx.globals[i].ty.clone()),
                     _ => None,
                 }
             }
@@ -1043,28 +1365,59 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 ExprKind::Var(name) if self.lookup(name).is_none() => match name.as_str() {
                     "length" => Some(I32),
                     "bytes" => Some(Ty::Pointer(Box::new(Ty::Int(IntTy::U8)))),
-                    _ => match self.ctx.names.get(name.as_str()) {
-                        Some(TopName::Func(i)) => self.ctx.funcs[*i].ret.clone(),
+                    _ => match self.top(name) {
+                        Some(TopName::Func(i)) => self.ctx.funcs[i].ret.clone(),
+                        Some(TopName::Struct(i)) => Some(self.ctx.struct_ty(i)),
                         _ => None,
                     },
                 },
                 ExprKind::Field(obj, f) => match &obj.kind {
-                    ExprKind::Var(ns) if self.ctx.modules.get(ns) == Some(&Module::Stdio) => match f.as_str()
-                    {
-                        "read_line" | "read_file" => Some(Ty::Maybe(Box::new(Ty::Str))),
-                        "write_file" => Some(Ty::Bool),
-                        "last_error" => Some(Ty::Str),
-                        _ => None,
-                    },
+                    ExprKind::Var(ns) if self.is_namespace(ns) => {
+                        match self.ctx.member(self.module, ns, f, e.span) {
+                            Ok(Member::Stdio) => match f.as_str() {
+                                "read_line" | "read_file" => Some(Ty::Maybe(Box::new(Ty::Str))),
+                                "write_file" => Some(Ty::Bool),
+                                "last_error" => Some(Ty::Str),
+                                _ => None,
+                            },
+                            Ok(Member::Func(i)) => self.ctx.funcs[i].ret.clone(),
+                            Ok(Member::Struct(i)) => Some(self.ctx.struct_ty(i)),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 },
                 _ => None,
+            },
+            ExprKind::Field(obj, f) => match &obj.kind {
+                ExprKind::Var(ns) if self.is_namespace(ns) => {
+                    match self.ctx.member(self.module, ns, f, e.span) {
+                        Ok(Member::Global(i)) => Some(self.ctx.globals[i].ty.clone()),
+                        _ => None,
+                    }
+                }
+                _ => match self.peek(obj)? {
+                    Ty::Struct(i, _) => self.ctx.structs[i]
+                        .fields
+                        .iter()
+                        .find(|x| x.name == *f)
+                        .map(|x| x.ty.clone()),
+                    _ => None,
+                },
             },
             ExprKind::Index(base, _) => match self.peek(base)? {
                 Ty::Array(t) | Ty::Pointer(t) => Some(*t),
                 _ => None,
             },
-            ExprKind::Convert(t, _) => resolve_type(t).ok(),
+            ExprKind::Convert(t, x) => {
+                let to = self.ctx.resolve_type(self.module, t).ok()?;
+                // 文字列から数への変換は、失敗することがあるので maybe になる。
+                if to.is_numeric() && to != Ty::Address && self.peek(x) == Some(Ty::Str) {
+                    Some(Ty::Maybe(Box::new(to)))
+                } else {
+                    Some(to)
+                }
+            }
             ExprKind::ArrayLit(elems) => {
                 let t = elems.first().and_then(|x| self.peek(x))?;
                 Some(Ty::Array(Box::new(t)))
@@ -1077,6 +1430,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
     fn expr(&mut self, e: &Expr, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
         match &e.kind {
             ExprKind::Int(n) => int_literal(*n, false, want, e.span),
+            ExprKind::Float(f) => dec_literal(*f, false, e.span),
             ExprKind::Char(c) => Ok((Operand::Imm(*c as i64), Ty::Int(IntTy::U8))),
             ExprKind::Bool(b) => Ok((Operand::Imm(*b as i64), Ty::Bool)),
             ExprKind::Str(s) => Ok((Operand::Str(self.ctx.intern(s)), Ty::Str)),
@@ -1084,11 +1438,18 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Var(name) => self.var(e.span, name),
             ExprKind::Unary(UnOp::Neg, inner) => {
                 // `-2147483648` は、2147483648 が 32 に入らなくても書けるようにする。
-                if let ExprKind::Int(n) = inner.kind {
-                    return int_literal(n, true, want, e.span);
+                match inner.kind {
+                    ExprKind::Int(n) => return int_literal(n, true, want, e.span),
+                    ExprKind::Float(f) => return dec_literal(f, true, e.span),
+                    _ => {}
                 }
                 let (a, t) = self.expr(inner, want)?;
-                let Some(it) = t.arith() else {
+                let dst = self.temp();
+                if t == Ty::Dec {
+                    self.emit(Inst::FNeg { dst, a });
+                    return Ok((Operand::Temp(dst), t));
+                }
+                let Some(it) = t.int_like() else {
                     let d = Diag::new(e.span, format!("符号の `-` は `{}` には使えません", t.name()));
                     return Err(if t == Ty::Bool {
                         d.hint("真と偽を入れ替えるなら `not` を使います")
@@ -1096,7 +1457,6 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         d
                     });
                 };
-                let dst = self.temp();
                 self.emit(Inst::Neg {
                     dst,
                     ty: it,
@@ -1108,7 +1468,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Unary(UnOp::Not, inner) => {
                 let (a, t) = self.expr(inner, want)?;
                 let dst = self.temp();
-                match (&t, t.arith()) {
+                match (&t, t.int_like()) {
                     (Ty::Bool, _) => self.emit(Inst::BoolNot { dst, a }),
                     (_, Some(it)) => self.emit(Inst::Not { dst, ty: it, a }),
                     _ => {
@@ -1151,68 +1511,114 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 });
                 Ok((Operand::Temp(dst), elem))
             }
+            ExprKind::Field(obj, f) => {
+                if let ExprKind::Var(ns) = &obj.kind {
+                    if self.is_namespace(ns) {
+                        return match self.ctx.member(self.module, ns, f, e.span)? {
+                            Member::Global(i) => self.global_read(i, e.span, &format!("{}.{}", ns, f)),
+                            Member::Func(_) => {
+                                Err(not_yet(e.span, "関数を値として使うこと（関数ポインタ）", 7))
+                            }
+                            Member::Struct(_) => Err(Diag::new(
+                                e.span,
+                                format!(
+                                    "`{}.{}` は構造体です。作るなら `{}.{}(…)` と書きます",
+                                    ns, f, ns, f
+                                ),
+                            )),
+                            Member::Stdio => Err(Diag::new(
+                                e.span,
+                                "名前空間の関数は、`stdio.print(…)` のように呼び出しの形で使います",
+                            )),
+                        };
+                    }
+                }
+                let (addr, fty) = self.field_addr(e, obj, f)?;
+                let dst = self.temp();
+                self.emit(Inst::Load {
+                    dst,
+                    addr,
+                    width: fty.width(),
+                });
+                Ok((Operand::Temp(dst), fty))
+            }
             ExprKind::Convert(ty, x) => self.convert(e, ty, x),
             ExprKind::SizeOf(ty) => {
-                let t = resolve_type(ty)?;
+                let t = self.ctx.resolve_type(self.module, ty)?;
+                // 構造体の変数や pointer:構造体 の要素に入るのはアドレスなので、構造体も 8 バイト。
                 int_literal(t.width().bytes() as u64, false, want, e.span)
             }
             ExprKind::ArrayLit(elems) => self.array_lit(e, elems, want),
             ExprKind::ArrayNew(n) => self.array_new(e, n, want),
-            ExprKind::Field(obj, _) => match &obj.kind {
-                ExprKind::Var(ns) if self.ctx.modules.contains_key(ns) => Err(Diag::new(
-                    e.span,
-                    "名前空間の関数は、`stdio.print(…)` のように呼び出しの形で使います",
-                )),
-                _ => Err(not_yet(e.span, "フィールド（`.`）", 6)),
-            },
-            ExprKind::Float(_) => Err(not_yet(e.span, "小数（`decnum` 型）", 6)),
         }
+    }
+
+    fn global_read(&mut self, i: usize, span: Span, name: &str) -> Result<(Operand, Ty), Diag> {
+        let ty = self.ctx.globals[i].ty.clone();
+        let immutable = self.ctx.globals[i].decl.immutable;
+        if immutable {
+            // immutable の値はコンパイル時に決まっているので、そのまま埋め込む。
+            match self.ctx.eval_global(i)? {
+                ConstVal::Int(v) => return Ok((Operand::Imm(v), ty)),
+                ConstVal::Str(s) => return Ok((Operand::Str(s), ty)),
+                // 箱に入った値は、グローバル変数の場所から読む。
+                ConstVal::Boxed(_) => {}
+            }
+        } else if self.const_ctx {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "値の変わるグローバル変数 `{}` は、グローバル変数の初期値には使えません",
+                    name
+                ),
+            )
+            .hint(format!("`{}` に `immutable` を付けると使えます", name)));
+        }
+        if self.const_ctx {
+            return Err(Diag::new(
+                span,
+                "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
+            ));
+        }
+        // 読んだ時点の値を一時変数に写す（後の関数呼び出しで書き換わっても影響しないように）。
+        let dst = self.temp();
+        self.emit(Inst::Copy {
+            dst,
+            src: Operand::Global(i as u32),
+        });
+        Ok((Operand::Temp(dst), ty))
     }
 
     fn var(&mut self, span: Span, name: &str) -> Result<(Operand, Ty), Diag> {
         if let Some(l) = self.lookup(name) {
-            let (var, ty) = (l.var, self.local_type(l));
+            let (var, declared, ty) = (l.var, l.ty.clone(), self.local_type(l));
             let dst = self.temp();
             self.emit(Inst::Copy {
                 dst,
                 src: Operand::Var(var),
             });
+            // 箱に入った maybe:32 などは、null でないとわかっていれば中身を取り出す。
+            if declared.is_maybe() && !ty.is_maybe() && ty.needs_box() {
+                let v = self.temp();
+                self.emit(Inst::Load {
+                    dst: v,
+                    addr: Operand::Temp(dst),
+                    width: Width::W8,
+                });
+                return Ok((Operand::Temp(v), ty));
+            }
             return Ok((Operand::Temp(dst), ty));
         }
-        match self.ctx.names.get(name) {
-            Some(TopName::Global(i)) => {
-                let i = *i;
-                let (ty, immutable) = (self.ctx.globals[i].ty.clone(), self.ctx.globals[i].decl.immutable);
-                if immutable {
-                    // immutable の値はコンパイル時に決まっているので、そのまま埋め込む。
-                    let v = match self.ctx.eval_global(i)? {
-                        ConstVal::Int(v) => Operand::Imm(v),
-                        ConstVal::Str(s) => Operand::Str(s),
-                    };
-                    return Ok((v, ty));
-                }
-                if self.const_ctx {
-                    return Err(Diag::new(
-                        span,
-                        format!(
-                            "値の変わるグローバル変数 `{}` は、グローバル変数の初期値には使えません",
-                            name
-                        ),
-                    )
-                    .hint(format!("`{}` に `immutable` を付けると使えます", name)));
-                }
-                // 読んだ時点の値を一時変数に写す（後の関数呼び出しで書き換わっても影響しないように）。
-                let dst = self.temp();
-                self.emit(Inst::Copy {
-                    dst,
-                    src: Operand::Global(i as u32),
-                });
-                Ok((Operand::Temp(dst), ty))
-            }
+        match self.top(name) {
+            Some(TopName::Global(i)) => self.global_read(i, span, name),
             Some(TopName::Func(_)) => Err(not_yet(span, "関数を値として使うこと（関数ポインタ）", 7)),
-            None if self.ctx.modules.contains_key(name) => Err(Diag::new(
+            Some(TopName::Struct(_)) => Err(Diag::new(
                 span,
-                format!("`{}` は名前空間です。`{}.print(…)` のように使います", name, name),
+                format!("`{}` は構造体の名前です。作るなら `{}(…)` と書きます", name, name),
+            )),
+            None if self.ctx.mods[self.module].imports.contains_key(name) => Err(Diag::new(
+                span,
+                format!("`{}` は名前空間です。`{}.名前` のように使います", name, name),
             )),
             None if BUILTINS.contains(&name) => Err(Diag::new(
                 span,
@@ -1288,6 +1694,64 @@ impl<'c, 'p> FnLower<'c, 'p> {
         Ok((Operand::Temp(dst), elem))
     }
 
+    /// `p.x` のフィールドのアドレス。（アドレス, フィールドの型）
+    fn field_addr(&mut self, e: &Expr, obj: &Expr, field: &str) -> Result<(Operand, Ty), Diag> {
+        let (ov, ot) = self.expr(obj, None)?;
+        let i = match &ot {
+            Ty::Struct(i, _) => *i,
+            Ty::Maybe(inner) if matches!(**inner, Ty::Struct(..)) => {
+                return Err(maybe_hint(Diag::new(
+                    obj.span,
+                    format!(
+                        "`{}` 型の値には、null でないことを確かめるまで `.` は使えません",
+                        ot.name()
+                    ),
+                )))
+            }
+            _ => {
+                return Err(Diag::new(
+                    obj.span,
+                    format!(
+                        "`.` でフィールドを使えるのは構造体だけですが、この式は `{}` 型です",
+                        ot.name()
+                    ),
+                ))
+            }
+        };
+        let Some(f) = self.ctx.structs[i].fields.iter().find(|f| f.name == field) else {
+            let names: Vec<&str> = self.ctx.structs[i]
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect();
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "構造体 `{}` に `{}` というフィールドはありません",
+                    ot.name(),
+                    field
+                ),
+            )
+            .hint(format!(
+                "あるのは {} です",
+                if names.is_empty() {
+                    "（なし）".to_string()
+                } else {
+                    names.join("、")
+                }
+            )));
+        };
+        let (offset, fty) = (f.offset, f.ty.clone());
+        let dst = self.temp();
+        self.emit(Inst::ElemAddr {
+            dst,
+            base: ov,
+            index: Operand::Imm(offset),
+            scale: 1,
+        });
+        Ok((Operand::Temp(dst), fty))
+    }
+
     fn binary(
         &mut self,
         e: &Expr,
@@ -1299,7 +1763,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         if is_comparison(op) {
             return self.comparison(e, op, a, b);
         }
-        let want_num = want.filter(|w| w.arith().is_some()).cloned();
+        let want_num = want.filter(|w| w.is_numeric()).cloned();
         let t = if is_logic(op) {
             self.peek(a)
                 .or_else(|| self.peek(b))
@@ -1311,13 +1775,40 @@ impl<'c, 'p> FnLower<'c, 'p> {
         if op == BinOp::Add && t == Ty::Str {
             let av = self.expr_as(a, &Ty::Str)?;
             let bv = self.expr_as(b, &Ty::Str)?;
-            let dst = self.rt(Rt::Concat, vec![av, bv], e.span, true)?.unwrap();
-            return Ok((Operand::Temp(dst), Ty::Str));
+            let v = self.rt_value(Rt::Concat, vec![av, bv], e.span)?;
+            return Ok((v, Ty::Str));
         }
         if t == Ty::Bool && is_logic(op) {
             return self.logic_bool(op, a, b);
         }
-        let Some(it) = t.arith() else {
+        if t == Ty::Dec {
+            let fop = match op {
+                BinOp::Add => FOp::Add,
+                BinOp::Sub => FOp::Sub,
+                BinOp::Mul => FOp::Mul,
+                BinOp::Div => FOp::Div,
+                BinOp::Mod => FOp::Mod,
+                BinOp::Pow => FOp::Pow,
+                _ => {
+                    return Err(
+                        Diag::new(e.span, format!("`{}` は `decnum` には使えません", op.as_str()))
+                            .hint("ビットの演算は整数にだけ使えます"),
+                    )
+                }
+            };
+            let av = self.expr_as(a, &t)?;
+            let bv = self.expr_as(b, &t)?;
+            let dst = self.temp();
+            self.emit(Inst::FBin {
+                dst,
+                op: fop,
+                a: av,
+                b: bv,
+                span: e.span,
+            });
+            return Ok((Operand::Temp(dst), t));
+        }
+        let Some(it) = t.int_like() else {
             let d = Diag::new(
                 e.span,
                 format!("`{}` は `{}` には使えません", op.as_str(), t.name()),
@@ -1325,6 +1816,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             return Err(match t {
                 Ty::Bool => d.hint("真偽の演算には `and`・`or`・`not` などを使います"),
                 Ty::Str => d.hint("文字列でできるのは `+`（連結）と `==`・`!=` だけです"),
+                Ty::Maybe(_) => maybe_hint(d),
                 _ => d,
             });
         };
@@ -1378,18 +1870,28 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 return Err(Diag::new(e.span, "`null` どうしを比べています"));
             }
             let other = if a_null { b } else { a };
-            let (ov, ot) = self.expr(other, None)?;
-            let declared_maybe = self.maybe_local(other).is_some();
-            if !ot.is_maybe() && !declared_maybe {
-                return Err(Diag::new(
-                    other.span,
-                    format!(
-                        "`{}` 型の値は null になりません（maybe ではありません）",
-                        ot.name()
-                    ),
-                )
-                .hint("null と比べられるのは、maybe の付いた型の値だけです"));
-            }
+            // maybe の変数は、絞り込まれていても、箱を開けずにそのまま比べる。
+            let ov = if let Some(var) = self.maybe_local(other) {
+                let dst = self.temp();
+                self.emit(Inst::Copy {
+                    dst,
+                    src: Operand::Var(var),
+                });
+                Operand::Temp(dst)
+            } else {
+                let (ov, ot) = self.expr(other, None)?;
+                if !ot.is_maybe() {
+                    return Err(Diag::new(
+                        other.span,
+                        format!(
+                            "`{}` 型の値は null になりません（maybe ではありません）",
+                            ot.name()
+                        ),
+                    )
+                    .hint("null と比べられるのは、maybe の付いた型の値だけです"));
+                }
+                ov
+            };
             let dst = self.temp();
             self.emit(Inst::Cmp {
                 dst,
@@ -1408,6 +1910,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
             (Some(x), Some(y)) if x != y && assignable(y, x) => y.clone(),
             _ => pa.or(pb).unwrap_or(I32),
         };
+        if let Ty::Maybe(inner) = &t {
+            if inner.needs_box() {
+                return Err(maybe_hint(Diag::new(
+                    e.span,
+                    format!("`{}` 型の値は、null でないことを確かめてから比べます", t.name()),
+                )));
+            }
+        }
         let av = self.expr_as(a, &t)?;
         let bv = self.expr_as(b, &t)?;
         let dst = self.temp();
@@ -1419,16 +1929,20 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 };
                 if *base == Ty::Str {
                     // 文字列は中身を比べる。
-                    let eq = self.rt(Rt::StrEq, vec![av, bv], e.span, true)?.unwrap();
+                    let eq = self.rt_value(Rt::StrEq, vec![av, bv], e.span)?;
                     if op == BinOp::Eq {
-                        return Ok((Operand::Temp(eq), Ty::Bool));
+                        return Ok((eq, Ty::Bool));
                     }
-                    self.emit(Inst::BoolNot {
+                    self.emit(Inst::BoolNot { dst, a: eq });
+                } else if *base == Ty::Dec {
+                    self.emit(Inst::FCmp {
                         dst,
-                        a: Operand::Temp(eq),
+                        op: cop,
+                        a: av,
+                        b: bv,
                     });
                 } else {
-                    // array と pointer は、同じものを指しているかを比べる。
+                    // array・pointer・構造体は、同じものを指しているかを比べる。
                     self.emit(Inst::Cmp {
                         dst,
                         op: cop,
@@ -1438,22 +1952,30 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
             }
             _ => {
-                if t.arith().is_none() {
+                if t == Ty::Dec {
+                    self.emit(Inst::FCmp {
+                        dst,
+                        op: cop,
+                        a: av,
+                        b: bv,
+                    });
+                } else if t.int_like().is_some() {
+                    self.emit(Inst::Cmp {
+                        dst,
+                        op: cop,
+                        a: av,
+                        b: bv,
+                    });
+                } else {
                     return Err(Diag::new(
                         e.span,
                         format!(
-                            "`{}` で大小を比べられるのは整数だけですが、この式は `{}` 型です",
+                            "`{}` で大小を比べられるのは数だけですが、この式は `{}` 型です",
                             op.as_str(),
                             t.name()
                         ),
                     ));
                 }
-                self.emit(Inst::Cmp {
-                    dst,
-                    op: cop,
-                    a: av,
-                    b: bv,
-                });
             }
         }
         Ok((Operand::Temp(dst), Ty::Bool))
@@ -1562,8 +2084,16 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Var(n) => n,
             ExprKind::Field(obj, f) => {
                 if let ExprKind::Var(ns) = &obj.kind {
-                    if let Some(m) = self.ctx.modules.get(ns).copied() {
-                        return self.module_call(e, m, ns, f, args);
+                    if self.is_namespace(ns) {
+                        return match self.ctx.member(self.module, ns, f, callee.span)? {
+                            Member::Stdio => self.stdio_call(e, ns, f, args),
+                            Member::Func(i) => self.call_func(e, i, args),
+                            Member::Struct(i) => self.construct(e, i, args).map(Some),
+                            Member::Global(_) => Err(Diag::new(
+                                callee.span,
+                                format!("`{}.{}` はグローバル変数なので、呼べません", ns, f),
+                            )),
+                        };
                     }
                 }
                 return Err(not_yet(callee.span, "フィールドに入った関数の呼び出し", 7));
@@ -1580,30 +2110,32 @@ impl<'c, 'p> FnLower<'c, 'p> {
         if BUILTINS.contains(&name.as_str()) {
             return self.builtin_call(e, name, args, want);
         }
-        if self.const_ctx {
-            return Err(Diag::new(e.span, "グローバル変数の初期値では、関数を呼べません")
-                .hint("初期値には、値がコンパイル時に決まる式だけが書けます"));
-        }
-        let index = match self.ctx.names.get(name.as_str()) {
-            Some(TopName::Func(i)) => *i,
-            Some(TopName::Global(_)) => {
-                return Err(Diag::new(
-                    callee.span,
-                    format!("`{}` はグローバル変数なので、呼べません", name),
-                ))
-            }
+        match self.top(name) {
+            Some(TopName::Func(i)) => self.call_func(e, i, args),
+            Some(TopName::Struct(i)) => self.construct(e, i, args).map(Some),
+            Some(TopName::Global(_)) => Err(Diag::new(
+                callee.span,
+                format!("`{}` はグローバル変数なので、呼べません", name),
+            )),
             None => {
                 let d = Diag::new(callee.span, format!("`{}` という関数はありません", name));
-                return Err(if name == "print" || name == "put" {
+                Err(if name == "print" || name == "put" {
                     d.hint(format!(
                         "表示は `import stdio;` を書いて、`stdio.{}(…)` で行います",
                         name
                     ))
                 } else {
                     d
-                });
+                })
             }
-        };
+        }
+    }
+
+    fn call_func(&mut self, e: &Expr, index: usize, args: &[Expr]) -> Result<Option<(Operand, Ty)>, Diag> {
+        if self.const_ctx {
+            return Err(Diag::new(e.span, "グローバル変数の初期値では、関数を呼べません")
+                .hint("初期値には、値がコンパイル時に決まる式だけが書けます"));
+        }
         let sig = self.ctx.funcs[index].clone();
         if args.len() != sig.params.len() {
             return Err(Diag::new(
@@ -1627,6 +2159,50 @@ impl<'c, 'p> FnLower<'c, 'p> {
             args: ops,
         });
         Ok(sig.ret.map(|t| (Operand::Temp(dst.unwrap()), t)))
+    }
+
+    /// `Point(1, 2)`：構造体を作る。
+    fn construct(&mut self, e: &Expr, index: usize, args: &[Expr]) -> Result<(Operand, Ty), Diag> {
+        let name = self.ctx.structs[index].def.name.clone();
+        let fields: Vec<(String, Ty, i64)> = self.ctx.structs[index]
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty.clone(), f.offset))
+            .collect();
+        if args.len() != fields.len() {
+            let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "構造体 `{}` のフィールドは {} 個ですが、{} 個書かれています",
+                    name,
+                    fields.len(),
+                    args.len()
+                ),
+            )
+            .hint(format!("フィールドの順に値を渡します（{}）", names.join("、"))));
+        }
+        let mut values = Vec::new();
+        for (arg, (_, ty, _)) in args.iter().zip(&fields) {
+            values.push(self.expr_as(arg, ty)?);
+        }
+        let size = self.ctx.structs[index].size;
+        let p = self.rt_value(Rt::Alloc, vec![Operand::Imm(size)], e.span)?;
+        for (v, (_, ty, offset)) in values.into_iter().zip(&fields) {
+            let addr = self.temp();
+            self.emit(Inst::ElemAddr {
+                dst: addr,
+                base: p,
+                index: Operand::Imm(*offset),
+                scale: 1,
+            });
+            self.emit(Inst::StoreMem {
+                addr: Operand::Temp(addr),
+                src: v,
+                width: ty.width(),
+            });
+        }
+        Ok((p, self.ctx.struct_ty(index)))
     }
 
     fn arg_count(&self, e: &Expr, name: &str, args: &[Expr], n: usize) -> Result<(), Diag> {
@@ -1707,14 +2283,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     }
                 };
                 let (n, nt) = self.expr(&args[0], Some(&I32))?;
-                if nt.arith().is_none() || nt == Ty::Address {
+                if !matches!(nt, Ty::Int(_)) {
                     return Err(Diag::new(
                         args[0].span,
                         format!("大きさは整数ですが、この式は `{}` 型です", nt.name()),
                     ));
                 }
-                let dst = self.rt(Rt::Alloc, vec![n], e.span, true)?.unwrap();
-                Ok(Some((Operand::Temp(dst), ptr)))
+                let v = self.rt_value(Rt::Alloc, vec![n], e.span)?;
+                Ok(Some((v, ptr)))
             }
             "bytes" => {
                 self.arg_count(e, name, args, 1)?;
@@ -1737,23 +2313,50 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     )),
                 }
             }
+            "copy" => {
+                self.arg_count(e, name, args, 1)?;
+                let (v, t) = self.expr(&args[0], None)?;
+                let r = match &t {
+                    Ty::Struct(i, _) => {
+                        let size = self.ctx.structs[*i].size;
+                        self.rt_value(Rt::Copy, vec![v, Operand::Imm(size)], e.span)?
+                    }
+                    Ty::Array(elem) => {
+                        let w = elem.width().bytes();
+                        self.rt_value(Rt::ArrayCopy, vec![v, Operand::Imm(w)], e.span)?
+                    }
+                    Ty::Maybe(_) => {
+                        return Err(maybe_hint(Diag::new(
+                            args[0].span,
+                            format!("`{}` 型の値は、null でないことを確かめてから複製します", t.name()),
+                        )))
+                    }
+                    _ => {
+                        return Err(Diag::new(
+                            args[0].span,
+                            format!(
+                                "`copy` は構造体と array にだけ使えますが、この式は `{}` 型です",
+                                t.name()
+                            ),
+                        ))
+                    }
+                };
+                Ok(Some((r, t)))
+            }
             "size" => Err(Diag::new(e.span, "`size` には型を書きます").hint("例：size(:32)")),
-            "copy" => Err(not_yet(e.span, "`copy`（構造体の複製）", 6)),
             "collect" => Err(not_yet(e.span, "`collect`（ガベージコレクション）", 7)),
             _ => unreachable!("組み込みの関数は上ですべて扱う"),
         }
     }
 
     /// `stdio.print(…)` など。
-    fn module_call(
+    fn stdio_call(
         &mut self,
         e: &Expr,
-        module: Module,
         ns: &str,
         name: &str,
         args: &[Expr],
     ) -> Result<Option<(Operand, Ty)>, Diag> {
-        let Module::Stdio = module;
         let full = format!("{}.{}", ns, name);
         let maybe_str = Ty::Maybe(Box::new(Ty::Str));
         match name {
@@ -1770,56 +2373,35 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("文字列なら `+` でつなげるか、`put` を何回かに分けて使います"));
                 }
                 let (v, t) = self.expr(&args[0], None)?;
-                let span = e.span;
-                match &t {
-                    Ty::Int(_) => self.rt(Rt::PutInt, vec![v], span, false)?,
-                    Ty::Address | Ty::Pointer(_) => self.rt(Rt::PutAddr, vec![v], span, false)?,
-                    Ty::Maybe(inner) if matches!(**inner, Ty::Pointer(_)) => {
-                        self.rt(Rt::PutAddr, vec![v], span, false)?
-                    }
-                    Ty::Bool => self.rt(Rt::PutBool, vec![v], span, false)?,
-                    Ty::Str | Ty::Null => self.rt(Rt::PutStr, vec![v], span, false)?,
-                    Ty::Maybe(inner) if **inner == Ty::Str => self.rt(Rt::PutStr, vec![v], span, false)?,
-                    Ty::Array(_) | Ty::Maybe(_) => {
-                        let elem = match &t {
-                            Ty::Array(x) => x,
-                            Ty::Maybe(inner) => match &**inner {
-                                Ty::Array(x) => x,
-                                _ => unreachable!("maybe は string・array・pointer にだけ付く"),
-                            },
-                            _ => unreachable!(),
-                        };
-                        let desc = self.ctx.intern(elem.desc().as_bytes());
-                        self.rt(Rt::PutArray, vec![v, Operand::Str(desc)], span, false)?
-                    }
-                };
+                let desc = self.ctx.intern(t.desc().as_bytes());
+                self.rt(Rt::Put, vec![v, Operand::Str(desc)], e.span, false)?;
                 if name == "print" {
-                    self.rt(Rt::Newline, vec![], span, false)?;
+                    self.rt(Rt::Newline, vec![], e.span, false)?;
                 }
                 Ok(None)
             }
             "read_line" => {
                 self.arg_count(e, &full, args, 0)?;
-                let dst = self.rt(Rt::ReadLine, vec![], e.span, true)?.unwrap();
-                Ok(Some((Operand::Temp(dst), maybe_str)))
+                let v = self.rt_value(Rt::ReadLine, vec![], e.span)?;
+                Ok(Some((v, maybe_str)))
             }
             "read_file" => {
                 self.arg_count(e, &full, args, 1)?;
                 let path = self.expr_as(&args[0], &Ty::Str)?;
-                let dst = self.rt(Rt::ReadFile, vec![path], e.span, true)?.unwrap();
-                Ok(Some((Operand::Temp(dst), maybe_str)))
+                let v = self.rt_value(Rt::ReadFile, vec![path], e.span)?;
+                Ok(Some((v, maybe_str)))
             }
             "write_file" => {
                 self.arg_count(e, &full, args, 2)?;
                 let path = self.expr_as(&args[0], &Ty::Str)?;
                 let text = self.expr_as(&args[1], &Ty::Str)?;
-                let dst = self.rt(Rt::WriteFile, vec![path, text], e.span, true)?.unwrap();
-                Ok(Some((Operand::Temp(dst), Ty::Bool)))
+                let v = self.rt_value(Rt::WriteFile, vec![path, text], e.span)?;
+                Ok(Some((v, Ty::Bool)))
             }
             "last_error" => {
                 self.arg_count(e, &full, args, 0)?;
-                let dst = self.rt(Rt::LastError, vec![], e.span, true)?.unwrap();
-                Ok(Some((Operand::Temp(dst), Ty::Str)))
+                let v = self.rt_value(Rt::LastError, vec![], e.span)?;
+                Ok(Some((v, Ty::Str)))
             }
             _ => Err(Diag::new(e.span, format!("`{}` に `{}` はありません", ns, name))
                 .hint("stdio にあるのは print、put、read_line、read_file、write_file、last_error です")),
@@ -1828,13 +2410,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     /// `to:型(x)`
     fn convert(&mut self, e: &Expr, ty: &TypeExpr, x: &Expr) -> Result<(Operand, Ty), Diag> {
-        let to = resolve_type(ty)?;
+        let to = self.ctx.resolve_type(self.module, ty)?;
         if to == Ty::Str {
             let (v, from) = self.expr(x, None)?;
             let func = match &from {
                 Ty::Str => return Ok((v, Ty::Str)),
                 Ty::Int(_) | Ty::Address => Rt::StrFromInt,
                 Ty::Bool => Rt::StrFromBool,
+                Ty::Dec => Rt::StrFromDec,
                 Ty::Maybe(_) => {
                     return Err(maybe_hint(Diag::new(
                         x.span,
@@ -1851,11 +2434,11 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     ))
                 }
             };
-            let dst = self.rt(func, vec![v], e.span, true)?.unwrap();
-            return Ok((Operand::Temp(dst), Ty::Str));
+            let v = self.rt_value(func, vec![v], e.span)?;
+            return Ok((v, Ty::Str));
         }
         // 整数リテラルは、変換先の型として読む（`to:64(3000000000)` を書けるように）。
-        let want = if to.arith().is_some() {
+        let want = if to.int_like().is_some() {
             Some(to.clone())
         } else {
             None
@@ -1876,13 +2459,40 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 });
                 Ok((Operand::Temp(dst), to))
             }
+            (Ty::Int(_), Ty::Dec) => {
+                let dst = self.temp();
+                self.emit(Inst::IntToDec { dst, a: v });
+                Ok((Operand::Temp(dst), to))
+            }
+            (Ty::Dec, Ty::Int(t)) => {
+                let dst = self.temp();
+                self.emit(Inst::DecToInt {
+                    dst,
+                    to: *t,
+                    a: v,
+                    span: e.span,
+                });
+                Ok((Operand::Temp(dst), to))
+            }
             // 同じ 8 バイトの値なので、そのまま使う。
             (Ty::Int(IntTy::I64), Ty::Address)
             | (Ty::Address, Ty::Int(IntTy::I64))
             | (Ty::Str | Ty::Array(_) | Ty::Pointer(_), Ty::Address)
             | (Ty::Address, Ty::Pointer(_))
             | (Ty::Bool, Ty::Int(_)) => Ok((v, to)),
-            (Ty::Str, Ty::Int(_)) => Err(not_yet(e.span, "文字列から数への変換（結果は maybe:32 など）", 6)),
+            // 文字列から数：失敗することがあるので maybe を返す。
+            (Ty::Str, Ty::Int(t)) => {
+                let r = self.rt_value(
+                    Rt::StrToInt,
+                    vec![v, Operand::Imm(ir::bits_of(*t) as i64)],
+                    e.span,
+                )?;
+                Ok((r, Ty::Maybe(Box::new(to))))
+            }
+            (Ty::Str, Ty::Dec) => {
+                let r = self.rt_value(Rt::StrToDec, vec![v], e.span)?;
+                Ok((r, Ty::Maybe(Box::new(to))))
+            }
             (Ty::Maybe(_), _) => Err(maybe_hint(Diag::new(
                 x.span,
                 format!(
@@ -1923,24 +2533,25 @@ impl<'c, 'p> FnLower<'c, 'p> {
             },
         };
         let width = elem.width();
-        let arr = self
-            .rt(
-                Rt::ArrayNew,
-                vec![
-                    Operand::Imm(elems.len() as i64),
-                    Operand::Imm(width.bytes()),
-                    Operand::Imm(0),
-                ],
-                e.span,
-                true,
-            )?
-            .unwrap();
-        for (i, el) in elems.iter().enumerate() {
-            let v = self.expr_as(el, &elem)?;
+        // 要素を先に計算してから、配列を作る。
+        let mut values = Vec::new();
+        for el in elems {
+            values.push(self.expr_as(el, &elem)?);
+        }
+        let arr = self.rt_value(
+            Rt::ArrayNew,
+            vec![
+                Operand::Imm(elems.len() as i64),
+                Operand::Imm(width.bytes()),
+                Operand::Imm(0),
+            ],
+            e.span,
+        )?;
+        for (i, v) in values.into_iter().enumerate() {
             let addr = self.temp();
             self.emit(Inst::ElemAddr {
                 dst: addr,
-                base: Operand::Temp(arr),
+                base: arr,
                 index: Operand::Imm(i as i64),
                 scale: width.bytes(),
             });
@@ -1950,7 +2561,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 width,
             });
         }
-        Ok((Operand::Temp(arr), Ty::Array(Box::new(elem))))
+        Ok((arr, Ty::Array(Box::new(elem))))
     }
 
     /// `array(n)`
@@ -1966,6 +2577,20 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("例：a:array:32 = array(10);"))
             }
         };
+        if let Ty::Struct(..) = elem {
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "`array:{}` は `array(n)` では作れません（要素の初期値がないため）",
+                    elem.name()
+                ),
+            )
+            .hint(format!(
+                "`array:maybe:{}` にするか、`[{}(…), …]` のように作ります",
+                elem.name(),
+                elem.name()
+            )));
+        }
         let (nv, nt) = self.expr(n, Some(&I32))?;
         if !matches!(nt, Ty::Int(_)) {
             return Err(Diag::new(
@@ -1973,21 +2598,18 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 format!("要素の数は整数ですが、この式は `{}` 型です", nt.name()),
             ));
         }
-        // 初期値：整数などは 0、string は ""、array は空の配列（null にはしない）。
+        // 初期値：数などは 0、string は ""、array は空の配列（null にはしない）、maybe は null。
         let kind = match elem {
             Ty::Str => 1,
             Ty::Array(_) => 2,
             _ => 0,
         };
-        let arr = self
-            .rt(
-                Rt::ArrayNew,
-                vec![nv, Operand::Imm(elem.width().bytes()), Operand::Imm(kind)],
-                e.span,
-                true,
-            )?
-            .unwrap();
-        Ok((Operand::Temp(arr), Ty::Array(Box::new(elem))))
+        let arr = self.rt_value(
+            Rt::ArrayNew,
+            vec![nv, Operand::Imm(elem.width().bytes()), Operand::Imm(kind)],
+            e.span,
+        )?;
+        Ok((arr, Ty::Array(Box::new(elem))))
     }
 }
 
@@ -1995,9 +2617,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
 fn int_literal(n: u64, negative: bool, want: Option<&Ty>, span: Span) -> Result<(Operand, Ty), Diag> {
     let ty = match want {
         Some(t @ (Ty::Int(_) | Ty::Address)) => t.clone(),
+        // decnum の場所に書いた整数リテラルは、decnum として読む。
+        Some(Ty::Dec) => return dec_literal(n as f64, negative, span),
+        Some(Ty::Maybe(inner)) if inner.is_numeric() => {
+            return int_literal(n, negative, Some(&**inner), span)
+        }
         _ => I32,
     };
-    let it = ty.arith().unwrap();
+    let it = ty.int_like().unwrap();
     let v: i128 = if negative { -(n as i128) } else { n as i128 };
     if v < ir::min_of(it) as i128 || v > ir::max_of(it) as i128 {
         let shown = if negative {
@@ -2017,4 +2644,13 @@ fn int_literal(n: u64, negative: bool, want: Option<&Ty>, span: Span) -> Result<
         ));
     }
     Ok((Operand::Imm(v as i64), ty))
+}
+
+/// 小数リテラル。値はビットのまま持つ。
+fn dec_literal(f: f64, negative: bool, span: Span) -> Result<(Operand, Ty), Diag> {
+    if !f.is_finite() {
+        return Err(Diag::new(span, "小数が大きすぎて、decnum の範囲に入りません"));
+    }
+    let v = if negative { -f } else { f };
+    Ok((Operand::Imm(v.to_bits() as i64), Ty::Dec))
 }

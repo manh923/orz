@@ -5,6 +5,7 @@
 //!
 //! 一時変数と変数はすべてスタックに置く（速さより、まず正しく動くことを優先）。
 //! 値はすべて 8 バイトで持つ。`32` は符号を広げ、`8` と `bool` は 0 を詰めた形にそろえておく。
+//! `decnum` はビットのまま持ち、計算するときだけ %xmm0・%xmm1 に移す。
 //!
 //! 関数の呼び出し方は C（System V ABI）と同じ：引数は %rdi, %rsi, %rdx, %rcx, %r8, %r9、
 //! 7 個目からはスタック、戻り値は %rax。
@@ -13,15 +14,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 use crate::ast::IntTy;
-use crate::ir::{self, CmpOp, ConstVal, Inst, IrBinOp, Operand, Place, Rt, Trap, Width};
-use crate::source::SourceFile;
+use crate::ir::{self, CmpOp, ConstVal, FOp, Inst, IrBinOp, Operand, Place, Rt, Trap, Width};
+use crate::source::{SourceFile, Span};
 
 const ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
 
-pub fn emit(prog: &ir::Program, src: &SourceFile) -> String {
+pub fn emit(prog: &ir::Program, srcs: &[SourceFile]) -> String {
     let mut g = Gen {
         out: String::new(),
-        src,
+        srcs,
         prog,
         func: 0,
         label: 0,
@@ -44,23 +45,28 @@ enum TrapKind {
     Message(String),
     /// 配列の範囲外。%rcx = 添字、%rdx = 長さ。
     Index,
-    /// 変換で範囲外。%rax = 値。
+    /// 整数の変換で範囲外。%rax = 値。
     Convert(IntTy),
+    /// decnum から整数への変換で範囲外。%xmm0 = 値。
+    ConvertDec(IntTy),
 }
+
+/// 実行時エラーの場所（ファイル番号, 行）。
+type Site = (u32, usize);
 
 struct Gen<'a> {
     out: String,
-    src: &'a SourceFile,
+    srcs: &'a [SourceFile],
     prog: &'a ir::Program,
     /// 今出している関数の番号。
     func: usize,
     label: u32,
-    /// 実行時エラーで表示する「ファイル名:行」。行番号 → ラベル番号。
-    sites: BTreeMap<usize, u32>,
+    /// 実行時エラーで表示する「ファイル名:行」→ ラベル番号。
+    sites: BTreeMap<Site, u32>,
     /// 実行時エラーの理由の文 → ラベル番号。
     messages: HashMap<String, u32>,
-    /// 関数の後ろにまとめて置く、実行時エラーへの飛び先。（ラベル, 行, 種類）
-    traps: Vec<(u32, usize, TrapKind)>,
+    /// 関数の後ろにまとめて置く、実行時エラーへの飛び先。（ラベル, 場所, 種類）
+    traps: Vec<(u32, Site, TrapKind)>,
 }
 
 macro_rules! asm {
@@ -76,8 +82,8 @@ impl<'a> Gen<'a> {
     }
 
     fn header(&mut self) {
-        let main = &self.prog.funcs[self.prog.main as usize].name;
-        let _ = writeln!(self.out, "# orz が出力したアセンブリ（{}）", self.src.name);
+        let main = &self.prog.funcs[self.prog.main as usize].symbol;
+        let _ = writeln!(self.out, "# orz が出力したアセンブリ（{}）", self.srcs[0].name);
         asm!(self, ".text");
         asm!(self, ".globl _start");
         let _ = writeln!(self.out, "_start:");
@@ -95,7 +101,7 @@ impl<'a> Gen<'a> {
             asm!(self, "call orz_rt_args");
             asm!(self, "movq %rax, %rdi");
         }
-        asm!(self, "call orz_f_{}", main);
+        asm!(self, "call {}", main);
         if !self.prog.main_returns {
             asm!(self, "xorl %eax, %eax");
         }
@@ -116,7 +122,7 @@ impl<'a> Gen<'a> {
     }
 
     fn global(&self, g: u32) -> String {
-        format!("orz_g_{}(%rip)", self.prog.globals[g as usize].name)
+        format!("{}(%rip)", self.prog.globals[g as usize].symbol)
     }
 
     fn place(&self, p: Place) -> String {
@@ -152,9 +158,13 @@ impl<'a> Gen<'a> {
         format!(".Lf{}_{}", self.func, l)
     }
 
-    fn site(&mut self, line: usize) -> u32 {
+    fn site_of(&self, span: Span) -> Site {
+        (span.file, self.srcs[span.file as usize].line_of(span.lo))
+    }
+
+    fn site(&mut self, site: Site) -> u32 {
         let n = self.sites.len() as u32;
-        *self.sites.entry(line).or_insert(n)
+        *self.sites.entry(site).or_insert(n)
     }
 
     fn message(&mut self, text: String) -> String {
@@ -163,19 +173,19 @@ impl<'a> Gen<'a> {
     }
 
     /// 実行時エラーへ飛ぶ命令を出す。
-    fn trap_jump(&mut self, cond: &str, line: usize, kind: TrapKind) {
+    fn trap_jump(&mut self, cond: &str, site: Site, kind: TrapKind) {
         let l = self.new_label();
-        self.traps.push((l, line, kind));
+        self.traps.push((l, site, kind));
         asm!(self, "{} .Ltrap{}", cond, l);
     }
 
-    fn trap(&mut self, cond: &str, line: usize, trap: Trap, ty: IntTy) {
-        self.trap_jump(cond, line, TrapKind::Message(trap.message(ty)));
+    fn trap(&mut self, cond: &str, site: Site, trap: Trap, ty: IntTy) {
+        self.trap_jump(cond, site, TrapKind::Message(trap.message(ty)));
     }
 
     fn function(&mut self, f: &ir::Function) {
         let frame = ((f.ntemps + f.nvars) * 8).div_ceil(16) * 16;
-        let _ = writeln!(self.out, "\n# function {}\norz_f_{}:", f.name, f.name);
+        let _ = writeln!(self.out, "\n# function {}\n{}:", f.name, f.symbol);
         asm!(self, "pushq %rbp");
         asm!(self, "movq %rsp, %rbp");
         if frame > 0 {
@@ -200,8 +210,8 @@ impl<'a> Gen<'a> {
             asm!(self, "ud2");
         }
         // 実行時エラーへの飛び先。ここでは %rsp が 16 の倍数なので、そのまま C の関数を呼べる。
-        for (l, line, kind) in std::mem::take(&mut self.traps) {
-            let site = self.site(line);
+        for (l, site, kind) in std::mem::take(&mut self.traps) {
+            let site = self.site(site);
             let _ = writeln!(self.out, ".Ltrap{}:", l);
             match kind {
                 TrapKind::Message(text) => {
@@ -221,6 +231,13 @@ impl<'a> Gen<'a> {
                     asm!(self, "leaq .Lsite{}(%rip), %rdi", site);
                     asm!(self, "leaq {}(%rip), %rdx", m);
                     asm!(self, "call orz_rt_panic_convert");
+                }
+                TrapKind::ConvertDec(to) => {
+                    let m = self.message(ir::convert_message(to));
+                    asm!(self, "movq %xmm0, %rsi");
+                    asm!(self, "leaq .Lsite{}(%rip), %rdi", site);
+                    asm!(self, "leaq {}(%rip), %rdx", m);
+                    asm!(self, "call orz_rt_panic_convert_dec");
                 }
             }
         }
@@ -262,18 +279,27 @@ impl<'a> Gen<'a> {
                 scale,
             } => {
                 self.load(*base, "%rax");
-                self.load(*index, "%rcx");
-                asm!(self, "leaq (%rax,%rcx,{}), %rax", scale);
+                match (index, scale) {
+                    (Operand::Imm(i), _) if i32::try_from(*i * *scale).is_ok() => {
+                        if *i != 0 {
+                            asm!(self, "addq ${}, %rax", *i * *scale);
+                        }
+                    }
+                    _ => {
+                        self.load(*index, "%rcx");
+                        asm!(self, "leaq (%rax,%rcx,{}), %rax", scale);
+                    }
+                }
                 self.store_temp(*dst);
             }
             Inst::CheckIndex { array, index, span } => {
-                let line = self.src.line_of(span.lo);
+                let site = self.site_of(*span);
                 self.load(*array, "%rax");
                 asm!(self, "movq -8(%rax), %rdx");
                 self.load(*index, "%rcx");
                 // 符号なしで比べるので、負の添字もここで弾ける。
                 asm!(self, "cmpq %rdx, %rcx");
-                self.trap_jump("jae", line, TrapKind::Index);
+                self.trap_jump("jae", site, TrapKind::Index);
             }
             Inst::Length { dst, a } => {
                 self.load(*a, "%rax");
@@ -295,7 +321,7 @@ impl<'a> Gen<'a> {
                 asm!(self, "jmp {}", e);
             }
             Inst::Call { dst, func, args } => {
-                let name = format!("orz_f_{}", self.prog.funcs[*func as usize].name);
+                let name = self.prog.funcs[*func as usize].symbol.clone();
                 self.call(&name, args, &[]);
                 if let Some(d) = dst {
                     self.store_temp(*d);
@@ -307,7 +333,7 @@ impl<'a> Gen<'a> {
                 args,
                 span,
             } => {
-                self.call_rt(*func, args, span.lo);
+                self.call_rt(*func, args, *span);
                 if let Some(d) = dst {
                     self.store_temp(*d);
                 }
@@ -353,22 +379,22 @@ impl<'a> Gen<'a> {
                 self.store_temp(*dst);
             }
             Inst::Neg { dst, ty, a, span } => {
-                let line = self.src.line_of(span.lo);
+                let site = self.site_of(*span);
                 self.load(*a, "%rax");
                 match ty {
                     IntTy::U8 => {
                         // 符号なしなので、0 以外の符号を変えると範囲の外になる。
                         asm!(self, "testl %eax, %eax");
-                        self.trap("jnz", line, Trap::Overflow, *ty);
+                        self.trap("jnz", site, Trap::Overflow, *ty);
                     }
                     IntTy::I32 => {
                         asm!(self, "negl %eax");
-                        self.trap("jo", line, Trap::Overflow, *ty);
+                        self.trap("jo", site, Trap::Overflow, *ty);
                         asm!(self, "movslq %eax, %rax");
                     }
                     IntTy::I64 => {
                         asm!(self, "negq %rax");
-                        self.trap("jo", line, Trap::Overflow, *ty);
+                        self.trap("jo", site, Trap::Overflow, *ty);
                     }
                 }
                 self.store_temp(*dst);
@@ -380,18 +406,18 @@ impl<'a> Gen<'a> {
                 a,
                 span,
             } => {
-                let line = self.src.line_of(span.lo);
+                let site = self.site_of(*span);
                 self.load(*a, "%rax");
                 match (from, to) {
                     (IntTy::I64, IntTy::I32) => {
                         asm!(self, "movslq %eax, %rcx");
                         asm!(self, "cmpq %rax, %rcx");
-                        self.trap_jump("jne", line, TrapKind::Convert(*to));
+                        self.trap_jump("jne", site, TrapKind::Convert(*to));
                     }
                     (IntTy::I32 | IntTy::I64, IntTy::U8) => {
                         // 符号なしで比べるので、負の値もここで弾ける。
                         asm!(self, "cmpq $255, %rax");
-                        self.trap_jump("ja", line, TrapKind::Convert(*to));
+                        self.trap_jump("ja", site, TrapKind::Convert(*to));
                     }
                     // 広げる向きは、そろえた形のままでよい。
                     _ => {}
@@ -406,44 +432,152 @@ impl<'a> Gen<'a> {
                 b,
                 span,
             } => {
-                let line = self.src.line_of(span.lo);
+                let site = self.site_of(*span);
                 if *op == IrBinOp::Pow {
-                    self.pow(*ty, *a, *b, span.lo);
+                    self.call_rt(Rt::Pow(*ty), &[*a, *b], *span);
                 } else {
                     self.load(*a, "%rax");
                     self.load(*b, "%rcx");
                     match ty {
-                        IntTy::I32 => self.bin32(*op, *b, line),
-                        IntTy::I64 => self.bin64(*op, *b, line),
-                        IntTy::U8 => self.bin8(*op, line),
+                        IntTy::I32 => self.bin32(*op, *b, site),
+                        IntTy::I64 => self.bin64(*op, *b, site),
+                        IntTy::U8 => self.bin8(*op, site),
                     }
                 }
+                self.store_temp(*dst);
+            }
+            Inst::FBin { dst, op, a, b, span } => {
+                let site = self.site_of(*span);
+                self.fbin(*op, *a, *b, site);
+                self.store_temp(*dst);
+            }
+            Inst::FNeg { dst, a } => {
+                self.load(*a, "%rax");
+                asm!(self, "btcq $63, %rax");
+                self.store_temp(*dst);
+            }
+            Inst::FCmp { dst, op, a, b } => {
+                self.load(*a, "%rax");
+                self.load(*b, "%rcx");
+                asm!(self, "movq %rax, %xmm0");
+                asm!(self, "movq %rcx, %xmm1");
+                // decnum は無限大や非数にならないので、比べた結果は CF と ZF だけで決まる。
+                asm!(self, "ucomisd %xmm1, %xmm0");
+                let set = match op {
+                    CmpOp::Lt => "setb",
+                    CmpOp::Gt => "seta",
+                    CmpOp::Le => "setbe",
+                    CmpOp::Ge => "setae",
+                    CmpOp::Eq => "sete",
+                    CmpOp::Ne => "setne",
+                };
+                asm!(self, "{} %al", set);
+                asm!(self, "movzbl %al, %eax");
+                self.store_temp(*dst);
+            }
+            Inst::IntToDec { dst, a } => {
+                self.load(*a, "%rax");
+                asm!(self, "cvtsi2sdq %rax, %xmm0");
+                asm!(self, "movq %xmm0, %rax");
+                self.store_temp(*dst);
+            }
+            Inst::DecToInt { dst, to, a, span } => {
+                let site = self.site_of(*span);
+                self.load(*a, "%rax");
+                asm!(self, "movq %rax, %xmm0");
+                // 切り捨てた結果が範囲に入るか：下限 < 値 < 上限（64 は 下限 <= 値）
+                let (lo, hi, lo_inclusive) = match to {
+                    IntTy::U8 => (-1.0f64, 256.0f64, false),
+                    IntTy::I32 => (-2147483649.0, 2147483648.0, false),
+                    IntTy::I64 => (-9223372036854775808.0, 9223372036854775808.0, true),
+                };
+                asm!(self, "movabsq ${}, %rcx", hi.to_bits() as i64);
+                asm!(self, "movq %rcx, %xmm1");
+                asm!(self, "ucomisd %xmm1, %xmm0");
+                self.trap_jump("jae", site, TrapKind::ConvertDec(*to));
+                asm!(self, "movabsq ${}, %rcx", lo.to_bits() as i64);
+                asm!(self, "movq %rcx, %xmm1");
+                asm!(self, "ucomisd %xmm1, %xmm0");
+                self.trap_jump(
+                    if lo_inclusive { "jb" } else { "jbe" },
+                    site,
+                    TrapKind::ConvertDec(*to),
+                );
+                asm!(self, "cvttsd2siq %xmm0, %rax");
                 self.store_temp(*dst);
             }
         }
     }
 
+    /// decnum の二項演算。結果を %rax に（ビットのまま）入れる。
+    fn fbin(&mut self, op: FOp, a: Operand, b: Operand, site: Site) {
+        self.load(a, "%rax");
+        self.load(b, "%rcx");
+        if matches!(op, FOp::Div | FOp::Mod) {
+            // 0 で割る（-0.0 も同じ）なら止める。
+            asm!(self, "movq %rcx, %xmm1");
+            asm!(self, "xorpd %xmm2, %xmm2");
+            asm!(self, "ucomisd %xmm2, %xmm1");
+            self.trap_jump("je", site, TrapKind::Message(Trap::DivZero.message(IntTy::I32)));
+        }
+        match op {
+            FOp::Mod => {
+                asm!(self, "movq %rax, %rdi");
+                asm!(self, "movq %rcx, %rsi");
+                asm!(self, "call orz_rt_fmod");
+                return;
+            }
+            FOp::Pow => {
+                let s = self.site(site);
+                asm!(self, "movq %rax, %rdi");
+                asm!(self, "movq %rcx, %rsi");
+                asm!(self, "leaq .Lsite{}(%rip), %rdx", s);
+                asm!(self, "call orz_rt_fpow");
+                return;
+            }
+            _ => {}
+        }
+        asm!(self, "movq %rax, %xmm0");
+        asm!(self, "movq %rcx, %xmm1");
+        let inst = match op {
+            FOp::Add => "addsd",
+            FOp::Sub => "subsd",
+            FOp::Mul => "mulsd",
+            _ => "divsd",
+        };
+        asm!(self, "{} %xmm1, %xmm0", inst);
+        asm!(self, "movq %xmm0, %rax");
+        // 指数のビットがすべて 1 なら、無限大か非数になっている。
+        asm!(self, "movq %rax, %rcx");
+        asm!(self, "shrq $52, %rcx");
+        asm!(self, "andl $0x7ff, %ecx");
+        asm!(self, "cmpl $0x7ff, %ecx");
+        self.trap_jump("je", site, TrapKind::Message(ir::DEC_OVERFLOW.to_string()));
+    }
+
     /// `32` の二項演算。%rax と %rcx から、結果を %rax に（符号を広げて）入れる。
-    fn bin32(&mut self, op: IrBinOp, b: Operand, line: usize) {
+    fn bin32(&mut self, op: IrBinOp, b: Operand, site: Site) {
         let ty = IntTy::I32;
         match op {
             IrBinOp::Add => {
                 asm!(self, "addl %ecx, %eax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
             IrBinOp::Sub => {
                 asm!(self, "subl %ecx, %eax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
             IrBinOp::Mul => {
                 asm!(self, "imull %ecx, %eax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
-            IrBinOp::Div | IrBinOp::Mod => self.divmod(op, b, line, ty, "l", "%eax", "%ecx", "%edx", "cltd"),
+            IrBinOp::Div | IrBinOp::Mod => {
+                self.divmod(op, b, site, ty, ["l", "%eax", "%ecx", "%edx", "cltd"])
+            }
             IrBinOp::Shl | IrBinOp::Shr => {
                 // 符号なしで比べるので、負の量もここで弾ける。
                 asm!(self, "cmpq $31, %rcx");
-                self.trap("ja", line, Trap::ShiftRange, ty);
+                self.trap("ja", site, Trap::ShiftRange, ty);
                 asm!(
                     self,
                     "{} %cl, %eax",
@@ -459,25 +593,27 @@ impl<'a> Gen<'a> {
     }
 
     /// `64` の二項演算。
-    fn bin64(&mut self, op: IrBinOp, b: Operand, line: usize) {
+    fn bin64(&mut self, op: IrBinOp, b: Operand, site: Site) {
         let ty = IntTy::I64;
         match op {
             IrBinOp::Add => {
                 asm!(self, "addq %rcx, %rax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
             IrBinOp::Sub => {
                 asm!(self, "subq %rcx, %rax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
             IrBinOp::Mul => {
                 asm!(self, "imulq %rcx, %rax");
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             }
-            IrBinOp::Div | IrBinOp::Mod => self.divmod(op, b, line, ty, "q", "%rax", "%rcx", "%rdx", "cqto"),
+            IrBinOp::Div | IrBinOp::Mod => {
+                self.divmod(op, b, site, ty, ["q", "%rax", "%rcx", "%rdx", "cqto"])
+            }
             IrBinOp::Shl | IrBinOp::Shr => {
                 asm!(self, "cmpq $63, %rcx");
-                self.trap("ja", line, Trap::ShiftRange, ty);
+                self.trap("ja", site, Trap::ShiftRange, ty);
                 asm!(
                     self,
                     "{} %cl, %rax",
@@ -492,26 +628,26 @@ impl<'a> Gen<'a> {
     }
 
     /// `8`（符号なし）の二項演算。値は 0〜255。
-    fn bin8(&mut self, op: IrBinOp, line: usize) {
+    fn bin8(&mut self, op: IrBinOp, site: Site) {
         let ty = IntTy::U8;
         match op {
             IrBinOp::Add => {
                 asm!(self, "addl %ecx, %eax");
                 asm!(self, "cmpl $255, %eax");
-                self.trap("ja", line, Trap::Overflow, ty);
+                self.trap("ja", site, Trap::Overflow, ty);
             }
             IrBinOp::Sub => {
                 asm!(self, "subl %ecx, %eax");
-                self.trap("jb", line, Trap::Overflow, ty);
+                self.trap("jb", site, Trap::Overflow, ty);
             }
             IrBinOp::Mul => {
                 asm!(self, "imull %ecx, %eax");
                 asm!(self, "cmpl $255, %eax");
-                self.trap("ja", line, Trap::Overflow, ty);
+                self.trap("ja", site, Trap::Overflow, ty);
             }
             IrBinOp::Div | IrBinOp::Mod => {
                 asm!(self, "testl %ecx, %ecx");
-                self.trap("jz", line, Trap::DivZero, ty);
+                self.trap("jz", site, Trap::DivZero, ty);
                 asm!(self, "xorl %edx, %edx");
                 asm!(self, "divl %ecx");
                 if op == IrBinOp::Mod {
@@ -520,7 +656,7 @@ impl<'a> Gen<'a> {
             }
             IrBinOp::Shl | IrBinOp::Shr => {
                 asm!(self, "cmpq $7, %rcx");
-                self.trap("ja", line, Trap::ShiftRange, ty);
+                self.trap("ja", site, Trap::ShiftRange, ty);
                 if op == IrBinOp::Shl {
                     asm!(self, "shll %cl, %eax");
                     asm!(self, "movzbl %al, %eax");
@@ -551,24 +687,13 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// 符号ありの割り算と余り。
-    #[allow(clippy::too_many_arguments)]
-    fn divmod(
-        &mut self,
-        op: IrBinOp,
-        b: Operand,
-        line: usize,
-        ty: IntTy,
-        s: &str,
-        ra: &str,
-        rc: &str,
-        rd: &str,
-        extend: &str,
-    ) {
+    /// 符号ありの割り算と余り。`r` は（命令の末尾, a, b, 余り, 符号を広げる命令）。
+    fn divmod(&mut self, op: IrBinOp, b: Operand, site: Site, ty: IntTy, r: [&str; 5]) {
+        let [s, ra, rc, rd, extend] = r;
         let is_div = op == IrBinOp::Div;
         if !matches!(b, Operand::Imm(v) if v != 0) {
             asm!(self, "test{} {}, {}", s, rc, rc);
-            self.trap("jz", line, Trap::DivZero, ty);
+            self.trap("jz", site, Trap::DivZero, ty);
         }
         let normal = self.new_label();
         let done = self.new_label();
@@ -578,7 +703,7 @@ impl<'a> Gen<'a> {
             asm!(self, "jne .L{}", normal);
             if is_div {
                 asm!(self, "neg{} {}", s, ra);
-                self.trap("jo", line, Trap::Overflow, ty);
+                self.trap("jo", site, Trap::Overflow, ty);
             } else {
                 asm!(self, "xorl %eax, %eax");
             }
@@ -593,12 +718,7 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, ".L{}:", done);
     }
 
-    /// 累乗はランタイムで計算する。
-    fn pow(&mut self, ty: IntTy, a: Operand, b: Operand, pos: usize) {
-        self.call_rt(Rt::Pow(ty), &[a, b], pos);
-    }
-
-    /// 関数を呼ぶ。`extra` は、引数の後ろに足すレジスタの準備（`leaq …` など）。
+    /// 関数を呼ぶ。`extra` は、引数の後ろに足すアドレス（`leaq …` で入れる）。
     /// 引数の 7 個目からは逆順にスタックに積み、呼ぶ時点で %rsp を 16 の倍数にそろえる。
     fn call(&mut self, name: &str, args: &[Operand], extra: &[String]) {
         let total = args.len() + extra.len();
@@ -629,15 +749,15 @@ impl<'a> Gen<'a> {
     }
 
     /// ランタイムの関数を呼ぶ。必要なら「ファイル名:行」やメッセージを後ろに足す。
-    fn call_rt(&mut self, func: Rt, args: &[Operand], pos: usize) {
-        let line = self.src.line_of(pos);
+    fn call_rt(&mut self, func: Rt, args: &[Operand], span: Span) {
+        let site = self.site_of(span);
         let mut args = args.to_vec();
         let mut extra = Vec::new();
         if let Rt::Pow(ty) = func {
             args.push(Operand::Imm(ir::bits_of(ty) as i64));
         }
         if func.takes_site() {
-            extra.push(format!(".Lsite{}", self.site(line)));
+            extra.push(format!(".Lsite{}", self.site(site)));
         }
         if let Rt::Pow(ty) = func {
             extra.push(self.message(Trap::Overflow.message(ty)));
@@ -661,22 +781,42 @@ impl<'a> Gen<'a> {
             let _ = writeln!(self.out, ".Lmsg{}:", n);
             self.bytes(text.as_bytes());
         }
-        let sites: Vec<(usize, u32)> = self.sites.iter().map(|(l, n)| (*l, *n)).collect();
-        for (line, n) in sites {
-            let text = format!("{}:{}", self.src.name, line);
+        let sites: Vec<(Site, u32)> = self.sites.iter().map(|(s, n)| (*s, *n)).collect();
+        for ((file, line), n) in sites {
+            let text = format!("{}:{}", self.srcs[file as usize].name, line);
             let _ = writeln!(self.out, ".Lsite{}:", n);
             self.bytes(text.as_bytes());
         }
-        if !self.prog.globals.is_empty() {
-            let _ = writeln!(self.out, "\n\t.data");
-            asm!(self, ".balign 8");
-            for g in &self.prog.globals {
-                let _ = writeln!(self.out, "orz_g_{}:", g.name);
-                match g.init {
-                    ConstVal::Int(v) => asm!(self, ".quad {}", v),
-                    ConstVal::Str(s) => asm!(self, ".quad .Lstr{}", s),
+        // 構造体を表示するための説明と、その表（ランタイムの orz_rt_put が読む）。
+        for (i, d) in self.prog.struct_descs.iter().enumerate() {
+            let _ = writeln!(self.out, ".Lsd{}:", i);
+            self.bytes(d);
+        }
+        asm!(self, ".balign 8");
+        asm!(self, ".globl orz_struct_descs");
+        let _ = writeln!(self.out, "orz_struct_descs:");
+        for i in 0..self.prog.struct_descs.len() {
+            asm!(self, ".quad .Lsd{}", i);
+        }
+        asm!(self, ".quad 0");
+
+        let _ = writeln!(self.out, "\n\t.data");
+        asm!(self, ".balign 8");
+        let mut boxes = Vec::new();
+        for g in &self.prog.globals {
+            let _ = writeln!(self.out, "{}:", g.symbol);
+            match g.init {
+                ConstVal::Int(v) => asm!(self, ".quad {}", v),
+                ConstVal::Str(s) => asm!(self, ".quad .Lstr{}", s),
+                ConstVal::Boxed(v) => {
+                    asm!(self, ".quad .Lbox{}", boxes.len());
+                    boxes.push(v);
                 }
             }
+        }
+        for (i, v) in boxes.iter().enumerate() {
+            let _ = writeln!(self.out, ".Lbox{}:", i);
+            asm!(self, ".quad {}", v);
         }
         // 実行できるスタックは要らない、という印。
         let _ = writeln!(self.out, "\n\t.section .note.GNU-stack,\"\",@progbits");

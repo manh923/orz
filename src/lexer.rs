@@ -227,8 +227,9 @@ pub struct Lexed {
     pub comments: Vec<Comment>,
 }
 
-pub fn lex(src: &str) -> Result<Lexed, Diag> {
-    Lexer {
+/// `file` は何番目のファイルか（エラーの場所に使う）。
+pub fn lex(src: &str, file: u32) -> Result<Lexed, Diag> {
+    let mut lexed = Lexer {
         src,
         bytes: src.as_bytes(),
         pos: 0,
@@ -236,6 +237,17 @@ pub fn lex(src: &str) -> Result<Lexed, Diag> {
         comments: Vec::new(),
     }
     .run()
+    .map_err(|mut d| {
+        d.span.file = file;
+        d
+    })?;
+    for t in &mut lexed.tokens {
+        t.span.file = file;
+    }
+    for c in &mut lexed.comments {
+        c.span.file = file;
+    }
+    Ok(lexed)
 }
 
 struct Lexer<'a> {
@@ -361,12 +373,27 @@ impl<'a> Lexer<'a> {
         while self.peek().is_ascii_digit() {
             self.pos += 1;
         }
+        let mut is_float = false;
         // 小数。`3.14` のように `.` の後に数字があるときだけ（`a.b` のフィールドと区別する）。
         if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
             self.pos += 1;
             while self.peek().is_ascii_digit() {
                 self.pos += 1;
             }
+            is_float = true;
+        }
+        // 指数。`1e10`、`2.5e-3`
+        let sign = matches!(self.peek_at(1), b'+' | b'-');
+        if matches!(self.peek(), b'e' | b'E')
+            && (self.peek_at(1).is_ascii_digit() || (sign && self.peek_at(2).is_ascii_digit()))
+        {
+            self.pos += if sign { 2 } else { 1 };
+            while self.peek().is_ascii_digit() {
+                self.pos += 1;
+            }
+            is_float = true;
+        }
+        if is_float {
             if self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
                 return Err(self.bad_number(lo));
             }
@@ -585,6 +612,10 @@ impl<'a> Lexer<'a> {
 mod tests {
     use super::*;
 
+    fn lex(s: &str) -> Result<Lexed, Diag> {
+        super::lex(s, 0)
+    }
+
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().tokens.into_iter().map(|t| t.tok).collect()
     }
@@ -610,6 +641,11 @@ mod tests {
     #[test]
     fn float_and_field() {
         assert_eq!(toks("2.5"), vec![Tok::Float(2.5), Tok::Eof]);
+        assert_eq!(
+            toks("1e3 2.5e-1 7E+2"),
+            vec![Tok::Float(1000.0), Tok::Float(0.25), Tok::Float(700.0), Tok::Eof]
+        );
+        assert!(lex("1e").is_err());
         assert_eq!(
             toks("p.x"),
             vec![Tok::Ident("p".into()), Tok::Dot, Tok::Ident("x".into()), Tok::Eof]

@@ -1,0 +1,21 @@
+import "geom.orz";
+
+export value:32 = 0;
+
+export function nothing bump() {
+    value = value + 1;
+}
+
+export function 32 call_helper() {
+    return helper();
+}
+
+function 32 helper() {
+    return 2;
+}
+
+// geom の型も使える
+export function 32 origin_x() {
+    o:geom.Point = geom.Point(0, 0);
+    return o.x;
+}

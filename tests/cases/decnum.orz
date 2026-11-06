@@ -1,0 +1,46 @@
+// exit: 0
+import stdio;
+
+function decnum average(a:array:decnum) {
+    s:decnum = 0;
+    i:32 = 0;
+    while (i < length(a)) {
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s / to:decnum(length(a));
+}
+
+function nothing main() {
+    stdio.print(0.1 + 0.2);
+    stdio.print(1.0 / 3.0);
+    stdio.print(2.0 ^ 0.5);
+    stdio.print(10.0 ^ 3);
+    stdio.print(2.0 ^ -1);
+    stdio.print(1e20);
+    stdio.print(1.5e-7);
+    stdio.print(123456789.0);
+    stdio.print(1e16);
+    stdio.print(1e15);
+    stdio.print(0.0001);
+    stdio.print(0.00001);
+    stdio.print(-0.0);
+    stdio.print(7.5 % 2.0);
+    stdio.print(-7.5 % 2.0);
+    x:decnum = 3;
+    stdio.print(x * 2);
+    stdio.print(-x);
+    stdio.print(to:32(3.99));
+    stdio.print(to:32(-3.99));
+    stdio.print(to:64(1e18));
+    stdio.print(to:8(255.9));
+    stdio.print(to:decnum(7) / 2);
+    n64:64 = 9007199254740993;
+    stdio.print(to:decnum(n64) == 9007199254740992.0);
+    stdio.print(x > 2.5 and x <= 3);
+    stdio.print(to:string(2.5) + "!");
+    stdio.print(average([1.0, 2.0, 4.0]));
+    stdio.print([1.5, -2.25]);
+    stdio.print(1.7976931348623157e308);
+    stdio.print(5e-324);
+}

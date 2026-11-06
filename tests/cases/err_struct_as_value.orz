@@ -1,0 +1,8 @@
+// error: `Point` は構造体の名前です。作るなら `Point(…)` と書きます
+struct Point {
+    x:32;
+}
+
+function nothing main() {
+    p:32 = Point;
+}

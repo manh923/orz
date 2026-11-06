@@ -1,0 +1,10 @@
+// error: 構造体 `Point` に `z` というフィールドはありません
+struct Point {
+    x:32;
+    y:32;
+}
+
+function 32 main() {
+    p:Point = Point(1, 2);
+    return p.z;
+}

@@ -5,7 +5,7 @@
 //! 何度も代入する値（ソースの変数、`and` の結果など）は `Var` に置く。
 //!
 //! 値はすべて 8 バイトの場所に置く。`32` は符号を広げ、`8` と `bool` は 0 を詰めた形にそろえておく。
-//! アドレス（string・array・pointer・address）はそのまま 8 バイト。
+//! アドレス（string・array・pointer・address・構造体）と `decnum`（ビットのまま）は 8 バイト。
 
 use crate::ast::IntTy;
 use crate::source::Span;
@@ -36,7 +36,7 @@ pub enum Width {
     W1,
     /// 4 バイト（読むときは符号を広げる）。`32`。
     W4,
-    /// 8 バイト。`64` とアドレス。
+    /// 8 バイト。`64`、`decnum` とアドレス。
     W8,
 }
 
@@ -68,6 +68,17 @@ pub enum IrBinOp {
     Xnor,
 }
 
+/// `decnum` の二項演算。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpOp {
     Lt,
@@ -93,17 +104,25 @@ pub enum Rt {
     StrEq,
     StrFromInt,
     StrFromBool,
-    PutInt,
-    PutAddr,
-    PutBool,
-    PutStr,
-    /// (配列, 型の説明)
-    PutArray,
+    /// (decnum のビット) → 文字列
+    StrFromDec,
+    /// (文字列, ビット数) → maybe の整数（箱に入れたもの）
+    StrToInt,
+    /// (文字列) → maybe:decnum（箱に入れたもの）
+    StrToDec,
+    /// (値, 型の説明) → 表示する
+    Put,
     Newline,
     ReadLine,
     ReadFile,
     WriteFile,
     LastError,
+    /// (値) → 値を入れた 8 バイトの箱（maybe:32 などに使う）
+    Box,
+    /// (構造体, 大きさ) → 同じ中身の新しい構造体
+    Copy,
+    /// (配列, 要素の大きさ) → 同じ中身の新しい配列
+    ArrayCopy,
 }
 
 impl Rt {
@@ -116,16 +135,18 @@ impl Rt {
             Rt::StrEq => "orz_rt_str_eq",
             Rt::StrFromInt => "orz_rt_str_from_int",
             Rt::StrFromBool => "orz_rt_str_from_bool",
-            Rt::PutInt => "orz_rt_put_int",
-            Rt::PutAddr => "orz_rt_put_addr",
-            Rt::PutBool => "orz_rt_put_bool",
-            Rt::PutStr => "orz_rt_put_str",
-            Rt::PutArray => "orz_rt_put_array",
+            Rt::StrFromDec => "orz_rt_str_from_dec",
+            Rt::StrToInt => "orz_rt_str_to_int",
+            Rt::StrToDec => "orz_rt_str_to_dec",
+            Rt::Put => "orz_rt_put",
             Rt::Newline => "orz_rt_newline",
             Rt::ReadLine => "orz_rt_read_line",
             Rt::ReadFile => "orz_rt_read_file",
             Rt::WriteFile => "orz_rt_write_file",
             Rt::LastError => "orz_rt_last_error",
+            Rt::Box => "orz_rt_box",
+            Rt::Copy => "orz_rt_copy",
+            Rt::ArrayCopy => "orz_rt_array_copy",
         }
     }
 
@@ -135,117 +156,61 @@ impl Rt {
     }
 }
 
+#[rustfmt::skip]
 #[derive(Clone, Debug)]
 pub enum Inst {
     /// `dst = a op b`。オーバーフローや 0 除算は実行時に止める。
-    Bin {
-        dst: u32,
-        op: IrBinOp,
-        ty: IntTy,
-        a: Operand,
-        b: Operand,
-        span: Span,
-    },
+    Bin { dst: u32, op: IrBinOp, ty: IntTy, a: Operand, b: Operand, span: Span },
     /// `dst = -a`
-    Neg {
-        dst: u32,
-        ty: IntTy,
-        a: Operand,
-        span: Span,
-    },
+    Neg { dst: u32, ty: IntTy, a: Operand, span: Span },
     /// `dst = not a`（ビットごと）
-    Not {
-        dst: u32,
-        ty: IntTy,
-        a: Operand,
-    },
+    Not { dst: u32, ty: IntTy, a: Operand },
     /// `dst = not a`（`bool`。0 と 1 を入れ替える）
-    BoolNot {
-        dst: u32,
-        a: Operand,
-    },
+    BoolNot { dst: u32, a: Operand },
     /// `dst = (a op b)`。8 バイトの符号ありで比べる。結果は 0 か 1。
-    Cmp {
-        dst: u32,
-        op: CmpOp,
-        a: Operand,
-        b: Operand,
-    },
+    Cmp { dst: u32, op: CmpOp, a: Operand, b: Operand },
     /// 整数の型を変える。範囲に入らなければ実行時に止める。
-    Convert {
-        dst: u32,
-        from: IntTy,
-        to: IntTy,
-        a: Operand,
-        span: Span,
-    },
+    Convert { dst: u32, from: IntTy, to: IntTy, a: Operand, span: Span },
+    /// `decnum` の二項演算。結果が無限大などになれば実行時に止める。
+    FBin { dst: u32, op: FOp, a: Operand, b: Operand, span: Span },
+    /// `dst = -a`（decnum）
+    FNeg { dst: u32, a: Operand },
+    /// `dst = (a op b)`（decnum）。結果は 0 か 1。
+    FCmp { dst: u32, op: CmpOp, a: Operand, b: Operand },
+    /// 整数 → decnum
+    IntToDec { dst: u32, a: Operand },
+    /// decnum → 整数（0 の方向に切り捨て）。範囲に入らなければ実行時に止める。
+    DecToInt { dst: u32, to: IntTy, a: Operand, span: Span },
     /// `dst = src`
-    Copy {
-        dst: u32,
-        src: Operand,
-    },
+    Copy { dst: u32, src: Operand },
     /// 変数に書く。
-    Store {
-        place: Place,
-        src: Operand,
-    },
+    Store { place: Place, src: Operand },
     /// `dst = *addr`
-    Load {
-        dst: u32,
-        addr: Operand,
-        width: Width,
-    },
+    Load { dst: u32, addr: Operand, width: Width },
     /// `*addr = src`
-    StoreMem {
-        addr: Operand,
-        src: Operand,
-        width: Width,
-    },
+    StoreMem { addr: Operand, src: Operand, width: Width },
     /// `dst = base + index * scale`
-    ElemAddr {
-        dst: u32,
-        base: Operand,
-        index: Operand,
-        scale: i64,
-    },
+    ElemAddr { dst: u32, base: Operand, index: Operand, scale: i64 },
     /// `0 <= index < 配列の長さ` でなければ実行時に止める。
-    CheckIndex {
-        array: Operand,
-        index: Operand,
-        span: Span,
-    },
+    CheckIndex { array: Operand, index: Operand, span: Span },
     /// `dst = 長さ`（string と array。先頭の手前の 8 バイト）
-    Length {
-        dst: u32,
-        a: Operand,
-    },
+    Length { dst: u32, a: Operand },
     /// 関数を呼ぶ。`func` は `Program::funcs` の番号。
-    Call {
-        dst: Option<u32>,
-        func: u32,
-        args: Vec<Operand>,
-    },
+    Call { dst: Option<u32>, func: u32, args: Vec<Operand> },
     /// ランタイムの関数を呼ぶ。
-    CallRt {
-        dst: Option<u32>,
-        func: Rt,
-        args: Vec<Operand>,
-        span: Span,
-    },
+    CallRt { dst: Option<u32>, func: Rt, args: Vec<Operand>, span: Span },
     Label(u32),
     Jump(u32),
     /// `cond` が 0 でなければ `then` へ、0 なら `els` へ。
-    Branch {
-        cond: Operand,
-        then: u32,
-        els: u32,
-    },
+    Branch { cond: Operand, then: u32, els: u32 },
     Ret(Option<Operand>),
 }
 
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
+    /// アセンブリでの名前（ファイルごとに区別する）。
+    pub symbol: String,
     /// 値を返すか（`nothing` でないか）。
     pub returns_value: bool,
     /// 引数の数。引数は `Var(0)` から順に入る。
@@ -260,11 +225,14 @@ pub enum ConstVal {
     Int(i64),
     /// 文字列リテラル（`Program::strings` の番号）。
     Str(u32),
+    /// 値を入れた箱（`maybe:32` などの、null でない初期値）。
+    Boxed(i64),
 }
 
 #[derive(Debug)]
 pub struct Global {
-    pub name: String,
+    /// アセンブリでの名前（ファイルごとに区別する）。
+    pub symbol: String,
     pub init: ConstVal,
 }
 
@@ -274,6 +242,8 @@ pub struct Program {
     pub globals: Vec<Global>,
     /// 文字列リテラル。
     pub strings: Vec<Vec<u8>>,
+    /// 構造体を表示するための説明（ランタイムの orz_rt_put が読む）。
+    pub struct_descs: Vec<Vec<u8>>,
     /// `main` の番号。
     pub main: u32,
     /// `main` が値を返すか（返すならそれが終了コード）。
@@ -301,6 +271,9 @@ impl Trap {
         }
     }
 }
+
+/// decnum の計算の結果が、無限大などになったとき。
+pub const DEC_OVERFLOW: &str = "計算の結果が decnum の範囲を超えました";
 
 /// 「32 の範囲（-2147483648〜2147483647）」
 pub fn range_text(ty: IntTy) -> String {
@@ -333,5 +306,14 @@ pub fn max_of(ty: IntTy) -> i64 {
         IntTy::U8 => u8::MAX as i64,
         IntTy::I32 => i32::MAX as i64,
         IntTy::I64 => i64::MAX,
+    }
+}
+
+/// decnum を整数に変換するとき、切り捨てた結果が範囲に入るか。
+pub fn dec_fits(v: f64, to: IntTy) -> bool {
+    match to {
+        IntTy::U8 => v > -1.0 && v < 256.0,
+        IntTy::I32 => v > -2147483649.0 && v < 2147483648.0,
+        IntTy::I64 => (-9223372036854775808.0..9223372036854775808.0).contains(&v),
     }
 }

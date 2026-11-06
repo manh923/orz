@@ -1,0 +1,13 @@
+// error: フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから確かめます
+struct Node {
+    value:32;
+    next:maybe:Node;
+}
+
+function 32 main() {
+    n:Node = Node(1, null);
+    if (n.next != null) {
+        return n.next.value;
+    }
+    return 0;
+}

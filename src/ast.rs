@@ -44,8 +44,8 @@ pub enum TypeKind {
     Maybe(Box<TypeExpr>),
     /// `function:戻り値の型(引数の型, ...)`
     Function(Box<RetType>, Vec<TypeExpr>),
-    /// 構造体の名前（ジェネリクスの型引数つき）。
-    Named(String, Vec<TypeExpr>),
+    /// 構造体の名前。`util.Point` のように名前空間が付くこともある。
+    Named(Option<String>, String),
 }
 
 #[derive(Clone, Debug)]
@@ -73,11 +73,14 @@ pub enum Item {
     Func(Func),
     Global(Decl),
     Import(Import),
+    Struct(StructDef),
 }
 
 #[derive(Debug)]
 pub struct Import {
     pub target: ImportTarget,
+    /// 自分のファイルの import なら、読み込んだファイルの番号（読み込むときに埋める）。
+    pub resolved: Option<usize>,
     /// `as` で付けた名前。
     pub alias: Option<String>,
     pub span: Span,
@@ -98,6 +101,24 @@ pub struct Func {
     pub ret: RetType,
     pub params: Vec<Param>,
     pub body: Block,
+    /// `export` が付いているか。
+    pub exported: bool,
+}
+
+/// `struct Point { x:32; y:32; }`
+#[derive(Debug)]
+pub struct StructDef {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldDef>,
+    pub exported: bool,
+}
+
+#[derive(Debug)]
+pub struct FieldDef {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -115,6 +136,8 @@ pub struct Decl {
     pub init: Expr,
     /// `immutable` が付いているか（グローバル変数だけ）。
     pub immutable: bool,
+    /// `export` が付いているか（グローバル変数だけ）。
+    pub exported: bool,
 }
 
 #[derive(Debug)]

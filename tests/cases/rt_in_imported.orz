@@ -1,0 +1,6 @@
+// runtime: modules/rt.orz:2: 0 で割りました
+import "modules/rt.orz";
+
+function 32 main() {
+    return rt.divide(1, 0);
+}

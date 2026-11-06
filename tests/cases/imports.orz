@@ -1,0 +1,21 @@
+// exit: 0
+import stdio;
+import "modules/geom.orz";
+import "modules/counter.orz" as cnt;
+
+function nothing main() {
+    p:geom.Point = geom.Point(3, 4);
+    stdio.print(geom.dist2(p));
+    stdio.print(p);
+    stdio.print(geom.ORIGIN_NAME);
+    cnt.value = cnt.value + 10;
+    cnt.bump();
+    stdio.print(cnt.value);
+    // 同じ名前の関数が別のファイルにあっても、ぶつからない
+    stdio.print(helper());
+    stdio.print(cnt.call_helper());
+}
+
+function 32 helper() {
+    return 1;
+}

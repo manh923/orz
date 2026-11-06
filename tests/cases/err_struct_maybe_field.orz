@@ -1,0 +1,10 @@
+// error: `maybe:Node` 型の値には、null でないことを確かめるまで `.` は使えません
+struct Node {
+    value:32;
+    next:maybe:Node;
+}
+
+function 32 main() {
+    n:Node = Node(1, null);
+    return n.next.value;
+}

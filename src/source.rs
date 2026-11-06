@@ -2,21 +2,27 @@
 
 use std::fmt::Write as _;
 
-/// ソースの中の範囲（バイト位置、`lo..hi`）。
+/// ソースの中の範囲（バイト位置、`lo..hi`）。`file` は何番目のファイルか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Span {
     pub lo: usize,
     pub hi: usize,
+    pub file: u32,
 }
 
 impl Span {
+    /// 0 番目のファイルの範囲。ほかのファイルなら、後で `file` を付け替える。
     pub fn new(lo: usize, hi: usize) -> Span {
-        Span { lo, hi }
+        Span { lo, hi, file: 0 }
     }
 
     /// 2 つの範囲をまとめた範囲。
     pub fn to(self, other: Span) -> Span {
-        Span::new(self.lo.min(other.lo), self.hi.max(other.hi))
+        Span {
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+            file: self.file,
+        }
     }
 }
 

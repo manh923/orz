@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::IntTy;
-use crate::ir::{self, CmpOp, ConstVal, Inst, IrBinOp, Operand, Trap};
+use crate::ir::{self, CmpOp, ConstVal, FOp, Inst, IrBinOp, Operand, Trap};
 use crate::source::{Diag, Span};
 
 pub fn fold(prog: &mut ir::Program) -> Result<(), Diag> {
@@ -132,6 +132,84 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
                     _ => None,
                 }
             }
+            Inst::FBin { dst, op, a, b, span } => {
+                *a = subst(&known, *a);
+                *b = subst(&known, *b);
+                if let Operand::Imm(bv) = *b {
+                    if matches!(op, FOp::Div | FOp::Mod) && f64::from_bits(bv as u64) == 0.0 {
+                        return Err(compile_err(*span, "0 で割りました"));
+                    }
+                }
+                match (*a, *b) {
+                    // 累乗は、実行時と同じ結果にするためランタイムに任せる。
+                    (Operand::Imm(av), Operand::Imm(bv)) if *op != FOp::Pow => {
+                        let (x, y) = (f64::from_bits(av as u64), f64::from_bits(bv as u64));
+                        let r = match op {
+                            FOp::Add => x + y,
+                            FOp::Sub => x - y,
+                            FOp::Mul => x * y,
+                            FOp::Div => x / y,
+                            // Rust の % は C の fmod と同じ（割られる数の符号、誤差なし）。
+                            FOp::Mod => x % y,
+                            FOp::Pow => unreachable!(),
+                        };
+                        if !r.is_finite() {
+                            return Err(compile_err(*span, ir::DEC_OVERFLOW));
+                        }
+                        Some(Repl::Const(*dst, r.to_bits() as i64))
+                    }
+                    _ => None,
+                }
+            }
+            Inst::FNeg { dst, a } => {
+                *a = subst(&known, *a);
+                match *a {
+                    Operand::Imm(av) => Some(Repl::Const(*dst, ((av as u64) ^ (1u64 << 63)) as i64)),
+                    _ => None,
+                }
+            }
+            Inst::FCmp { dst, op, a, b } => {
+                *a = subst(&known, *a);
+                *b = subst(&known, *b);
+                match (*a, *b) {
+                    (Operand::Imm(av), Operand::Imm(bv)) => {
+                        let (x, y) = (f64::from_bits(av as u64), f64::from_bits(bv as u64));
+                        let r = match op {
+                            CmpOp::Lt => x < y,
+                            CmpOp::Gt => x > y,
+                            CmpOp::Le => x <= y,
+                            CmpOp::Ge => x >= y,
+                            CmpOp::Eq => x == y,
+                            CmpOp::Ne => x != y,
+                        };
+                        Some(Repl::Const(*dst, r as i64))
+                    }
+                    _ => None,
+                }
+            }
+            Inst::IntToDec { dst, a } => {
+                *a = subst(&known, *a);
+                match *a {
+                    Operand::Imm(av) => Some(Repl::Const(*dst, (av as f64).to_bits() as i64)),
+                    _ => None,
+                }
+            }
+            Inst::DecToInt { dst, to, a, span } => {
+                *a = subst(&known, *a);
+                match *a {
+                    Operand::Imm(av) => {
+                        let x = f64::from_bits(av as u64);
+                        if !ir::dec_fits(x, *to) {
+                            return Err(compile_err(
+                                *span,
+                                &format!("変換する値 {} が {}", x, ir::convert_message(*to)),
+                            ));
+                        }
+                        Some(Repl::Const(*dst, x.trunc() as i64))
+                    }
+                    _ => None,
+                }
+            }
             Inst::Copy { dst, src } => {
                 *src = subst(&known, *src);
                 if let Operand::Imm(v) = *src {
@@ -198,6 +276,10 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
         }
     }
     Ok(known)
+}
+
+fn compile_err(span: Span, msg: &str) -> Diag {
+    Diag::new(span, format!("コンパイル時にわかる誤り：{}", msg))
 }
 
 fn compile_trap(t: Trap, ty: IntTy, span: Span) -> Diag {

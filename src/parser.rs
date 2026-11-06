@@ -95,19 +95,73 @@ impl Parser {
     // ---------------- トップレベル ----------------
 
     fn item(&mut self) -> PResult<Item> {
-        match self.peek() {
-            Tok::Kw(Kw::Function) => Ok(Item::Func(self.func()?)),
-            Tok::Ident(_) => Ok(Item::Global(self.decl(false)?)),
-            Tok::Kw(Kw::Struct) => Err(self.not_yet("`struct`")),
-            Tok::Kw(Kw::Import) => Ok(Item::Import(self.import()?)),
-            Tok::Kw(Kw::Export) => Err(self.not_yet("`export`")),
-            Tok::Kw(Kw::Extern) => Err(self.not_yet("`extern`")),
+        let exported = self.eat(&Tok::Kw(Kw::Export));
+        let mut item = match self.peek() {
+            Tok::Kw(Kw::Function) => Item::Func(self.func()?),
+            Tok::Ident(_) => Item::Global(self.decl(false)?),
+            Tok::Kw(Kw::Struct) => Item::Struct(self.struct_def()?),
+            Tok::Kw(Kw::Import) if exported => {
+                return Err(Diag::new(self.span(), "`import` に `export` は付けられません"))
+            }
+            Tok::Kw(Kw::Import) => Item::Import(self.import()?),
+            Tok::Kw(Kw::Export) => return Err(Diag::new(self.span(), "`export` が 2 つ続いています")),
+            Tok::Kw(Kw::Extern) => return Err(self.not_yet("`extern`")),
             Tok::Kw(Kw::Immutable) => {
                 self.bump();
-                Ok(Item::Global(self.decl(true)?))
+                Item::Global(self.decl(true)?)
             }
-            _ => Err(self.unexpected("関数（`function`）かグローバル変数の宣言")),
+            _ => return Err(self.unexpected("関数（`function`）、構造体（`struct`）、グローバル変数の宣言")),
+        };
+        match &mut item {
+            Item::Func(f) => f.exported = exported,
+            Item::Global(d) => d.exported = exported,
+            Item::Struct(s) => s.exported = exported,
+            Item::Import(_) => {}
         }
+        Ok(item)
+    }
+
+    fn struct_def(&mut self) -> PResult<StructDef> {
+        self.bump(); // struct
+        let (name, name_span) = self.ident("構造体の名前")?;
+        if self.peek() == &Tok::Colon {
+            return Err(self.not_yet("ジェネリクス（`struct 名前:T`）"));
+        }
+        self.expect(Tok::LBrace, "構造体の始まりの")?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(
+                    Diag::new(self.span(), "`}` が足りません").hint("構造体を `}` で閉じ忘れていませんか")
+                );
+            }
+            let (fname, fspan) = self.ident("フィールドの名前")?;
+            if self.peek() != &Tok::Colon {
+                return Err(
+                    Diag::new(self.span(), format!("フィールド `{}` の型がありません", fname))
+                        .hint(format!("`{}:32;` のように `:` と型を書きます", fname)),
+                );
+            }
+            self.bump();
+            let ty = self.type_expr()?;
+            if self.peek() == &Tok::Assign {
+                return Err(Diag::new(self.span(), "フィールドには初期値を書けません")
+                    .hint("値は、構造体を作るとき（`Point(1, 2)`）に渡します"));
+            }
+            self.semi()?;
+            fields.push(FieldDef {
+                name: fname,
+                ty,
+                span: fspan,
+            });
+        }
+        self.bump(); // }
+        Ok(StructDef {
+            name,
+            name_span,
+            fields,
+            exported: false,
+        })
     }
 
     fn import(&mut self) -> PResult<Import> {
@@ -140,6 +194,7 @@ impl Parser {
         Ok(Import {
             target,
             alias,
+            resolved: None,
             span: lo.to(self.prev_span()),
         })
     }
@@ -189,6 +244,7 @@ impl Parser {
             ret,
             params,
             body,
+            exported: false,
         })
     }
 
@@ -280,8 +336,13 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
-                // ジェネリクスの型引数（`List:32`）は、定義から数がわかってから読むので、今は付けない。
-                TypeKind::Named(name, Vec::new())
+                // `util.Point` のように、名前空間の付いた構造体の名前。
+                if self.eat(&Tok::Dot) {
+                    let (inner, _) = self.ident("構造体の名前")?;
+                    TypeKind::Named(Some(name), inner)
+                } else {
+                    TypeKind::Named(None, name)
+                }
             }
             _ => return Err(self.unexpected("型")),
         };
@@ -339,6 +400,7 @@ impl Parser {
             ty,
             init,
             immutable,
+            exported: false,
         })
     }
 
@@ -683,7 +745,7 @@ mod tests {
     use crate::lexer::lex;
 
     fn parse_src(s: &str) -> Result<Program, Diag> {
-        parse(lex(s).unwrap().tokens)
+        parse(lex(s, 0).unwrap().tokens)
     }
 
     fn ret_expr(src: &str) -> String {

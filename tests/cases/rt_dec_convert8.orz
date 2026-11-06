@@ -1,0 +1,5 @@
+// runtime: 変換する値 -1.0 が 8 の範囲（0〜255）に入りません
+function nothing main() {
+    x:decnum = -1.0;
+    n:8 = to:8(x);
+}

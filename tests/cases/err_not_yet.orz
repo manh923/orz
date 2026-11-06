@@ -1,5 +1,5 @@
-// error: 構造体はまだ実装していません（実装の手順 6 で対応）
-function 32 main() {
-    p:Point = Point(1, 2);
-    return 0;
+// error: `arena`はまだ実装していません（実装の手順 7 で対応）
+function nothing main() {
+    arena {
+    }
 }
