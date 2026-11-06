@@ -1,0 +1,6 @@
+// error: コンパイル時にわかる誤り：変換する値 -1 が 8 の範囲（0〜255）に入りません
+immutable N:32 = -1;
+
+function 32 main() {
+    return to:32(to:8(N));
+}

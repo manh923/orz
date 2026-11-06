@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::ast::IntTy;
-use crate::ir::{self, CmpOp, Inst, IrBinOp, Operand, Trap};
+use crate::ir::{self, CmpOp, ConstVal, Inst, IrBinOp, Operand, Trap};
 use crate::source::{Diag, Span};
 
 pub fn fold(prog: &mut ir::Program) -> Result<(), Diag> {
@@ -21,11 +21,12 @@ pub fn fold(prog: &mut ir::Program) -> Result<(), Diag> {
 }
 
 /// グローバル変数の初期値の計算。`result` の値がコンパイル時にわかれば返す。
-pub fn fold_const(insts: &mut [Inst], result: Operand) -> Result<Option<i64>, Diag> {
+pub fn fold_const(insts: &mut [Inst], result: Operand) -> Result<Option<ConstVal>, Diag> {
     let known = fold_insts(insts)?;
     Ok(match result {
-        Operand::Imm(v) => Some(v),
-        Operand::Temp(t) => known.get(&t).copied(),
+        Operand::Imm(v) => Some(ConstVal::Int(v)),
+        Operand::Str(s) => Some(ConstVal::Str(s)),
+        Operand::Temp(t) => known.get(&t).copied().map(ConstVal::Int),
         _ => None,
     })
 }
@@ -106,6 +107,31 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
                     _ => None,
                 }
             }
+            Inst::Convert {
+                dst,
+                from: _,
+                to,
+                a,
+                span,
+            } => {
+                *a = subst(&known, *a);
+                match *a {
+                    Operand::Imm(av) => {
+                        if av < ir::min_of(*to) || av > ir::max_of(*to) {
+                            return Err(Diag::new(
+                                *span,
+                                format!(
+                                    "コンパイル時にわかる誤り：変換する値 {} が {}",
+                                    av,
+                                    ir::convert_message(*to)
+                                ),
+                            ));
+                        }
+                        Some(Repl::Const(*dst, av))
+                    }
+                    _ => None,
+                }
+            }
             Inst::Copy { dst, src } => {
                 *src = subst(&known, *src);
                 if let Operand::Imm(v) = *src {
@@ -117,7 +143,30 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
                 *src = subst(&known, *src);
                 None
             }
-            Inst::Call { args, .. } => {
+            Inst::Load { addr, .. } => {
+                *addr = subst(&known, *addr);
+                None
+            }
+            Inst::StoreMem { addr, src, .. } => {
+                *addr = subst(&known, *addr);
+                *src = subst(&known, *src);
+                None
+            }
+            Inst::ElemAddr { base, index, .. } => {
+                *base = subst(&known, *base);
+                *index = subst(&known, *index);
+                None
+            }
+            Inst::CheckIndex { array, index, .. } => {
+                *array = subst(&known, *array);
+                *index = subst(&known, *index);
+                None
+            }
+            Inst::Length { a, .. } => {
+                *a = subst(&known, *a);
+                None
+            }
+            Inst::Call { args, .. } | Inst::CallRt { args, .. } => {
                 for a in args.iter_mut() {
                     *a = subst(&known, *a);
                 }

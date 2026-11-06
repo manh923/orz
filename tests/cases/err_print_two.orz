@@ -1,0 +1,6 @@
+// error: `stdio.print` に渡せる値は 1 つですが、2 個書かれています
+import stdio;
+
+function nothing main() {
+    stdio.print("a", "b");
+}

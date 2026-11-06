@@ -1,0 +1,8 @@
+// error: グローバル変数は、いったんローカル変数に入れてから確かめます
+g:maybe:string = null;
+
+function nothing main() {
+    if (g != null) {
+        x:string = g;
+    }
+}

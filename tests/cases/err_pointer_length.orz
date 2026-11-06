@@ -1,0 +1,5 @@
+// error: pointer は長さを持っていないので、`length` は使えません
+function nothing main() {
+    p:pointer:32 = allocate(4);
+    n:32 = length(p);
+}

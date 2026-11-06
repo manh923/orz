@@ -5,9 +5,14 @@
 //!   // error: 文字列     コンパイルエラーになり、その文字列が表示される
 //!   // runtime: 文字列   実行時エラーになり、その文字列が表示される
 //!   // flags: --no-fold   定数の畳み込みを切ってコンパイルする（実行時の検査を試すため）
+//!   // args: a b c       実行するときのコマンドライン引数
+//!
+//! 同じ名前の `.out` があれば、標準出力がその中身とぴったり同じかを確かめる。
+//! 同じ名前の `.in` があれば、それを標準入力に流す。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const PANIC_EXIT_CODE: i32 = 101;
 
@@ -25,13 +30,16 @@ fn header(src: &str, key: &str) -> Option<String> {
     })
 }
 
-/// 実行ファイルを作って実行する。（終了コード, 標準エラー出力）
-fn build_and_run(case: &Path, dir: &Path, no_fold: bool) -> Result<(i32, String), String> {
-    let exe = dir.join(format!(
-        "{}{}",
-        case.file_stem().unwrap().to_str().unwrap(),
-        if no_fold { "-nofold" } else { "" }
-    ));
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// 実行ファイルを作って実行する。コンパイルエラーなら Err（標準エラー出力）。
+fn build_and_run(case: &Path, dir: &Path, no_fold: bool, src: &str) -> Result<Run, String> {
+    let stem = case.file_stem().unwrap().to_str().unwrap();
+    let exe = dir.join(format!("{}{}", stem, if no_fold { "-nofold" } else { "" }));
     let mut cmd = Command::new(orz());
     cmd.current_dir(case.parent().unwrap())
         .arg("build")
@@ -45,11 +53,41 @@ fn build_and_run(case: &Path, dir: &Path, no_fold: bool) -> Result<(i32, String)
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
-    let run = Command::new(&exe).output().unwrap();
-    Ok((
-        run.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&run.stderr).into_owned(),
-    ))
+    // ファイルを書くテストのため、実行はテストごとの空のフォルダで行う。
+    let work = dir.join(format!("work-{}", stem));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let args: Vec<String> = header(src, "args:")
+        .map(|a| a.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
+    let input = std::fs::read(case.with_extension("in")).unwrap_or_default();
+    let mut child = Command::new(&exe)
+        .args(&args)
+        .current_dir(&work)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    Ok(Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+fn check_stdout(case: &Path, run: &Run) -> Result<(), String> {
+    if let Ok(want) = std::fs::read_to_string(case.with_extension("out")) {
+        if run.stdout != want {
+            return Err(format!(
+                "標準出力が違います\n--- 期待 ---\n{}--- 実際 ---\n{}",
+                want, run.stdout
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check(case: &Path, dir: &Path) -> Result<(), String> {
@@ -57,28 +95,35 @@ fn check(case: &Path, dir: &Path) -> Result<(), String> {
     if let Some(exit) = header(&src, "exit:") {
         let want: i32 = exit.parse().unwrap();
         for no_fold in [false, true] {
-            let (code, err) =
-                build_and_run(case, dir, no_fold).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
-            if code != want {
+            let run =
+                build_and_run(case, dir, no_fold, &src).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
+            if run.code != want {
                 return Err(format!(
                     "終了コード {}（期待 {}、no_fold={}）\n{}",
-                    code, want, no_fold, err
+                    run.code, want, no_fold, run.stderr
                 ));
             }
+            check_stdout(case, &run)?;
         }
     } else if let Some(msg) = header(&src, "error:") {
-        match build_and_run(case, dir, false) {
+        match build_and_run(case, dir, false, &src) {
             Ok(_) => return Err("コンパイルエラーになりませんでした".into()),
             Err(e) if e.contains(&msg) => {}
             Err(e) => return Err(format!("エラーの内容が違います:\n{}", e)),
         }
     } else if let Some(msg) = header(&src, "runtime:") {
         let no_fold = header(&src, "flags:").is_some_and(|f| f.contains("--no-fold"));
-        let (code, err) =
-            build_and_run(case, dir, no_fold).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
-        if code != PANIC_EXIT_CODE || !err.contains(&msg) || !err.starts_with("実行時エラー: ") {
-            return Err(format!("終了コード {}、標準エラー出力:\n{}", code, err));
+        let run = build_and_run(case, dir, no_fold, &src).map_err(|e| format!("コンパイルエラー:\n{}", e))?;
+        if run.code != PANIC_EXIT_CODE
+            || !run.stderr.contains(&msg)
+            || !run.stderr.starts_with("実行時エラー: ")
+        {
+            return Err(format!(
+                "終了コード {}、標準エラー出力:\n{}",
+                run.code, run.stderr
+            ));
         }
+        check_stdout(case, &run)?;
     } else {
         return Err("先頭に // exit: か // error: か // runtime: がありません".into());
     }

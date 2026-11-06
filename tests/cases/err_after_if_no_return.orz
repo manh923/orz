@@ -1,0 +1,11 @@
+// error: null でないことを確かめるまで `length` は使えません
+// then の中で抜けないので、if の後ろでは null かもしれない
+import stdio;
+
+function nothing main() {
+    n:maybe:string = stdio.read_line();
+    if (n == null) {
+        stdio.print("null");
+    }
+    stdio.print(length(n));
+}

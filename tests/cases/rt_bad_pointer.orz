@@ -1,0 +1,6 @@
+// runtime: ポインタが不正な場所を指しています
+function nothing main() {
+    a:address = to:address(to:64(8));
+    p:pointer:8 = bytes(a);
+    p[0] = 1;
+}

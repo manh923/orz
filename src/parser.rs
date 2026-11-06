@@ -99,7 +99,7 @@ impl Parser {
             Tok::Kw(Kw::Function) => Ok(Item::Func(self.func()?)),
             Tok::Ident(_) => Ok(Item::Global(self.decl(false)?)),
             Tok::Kw(Kw::Struct) => Err(self.not_yet("`struct`")),
-            Tok::Kw(Kw::Import) => Err(self.not_yet("`import`")),
+            Tok::Kw(Kw::Import) => Ok(Item::Import(self.import()?)),
             Tok::Kw(Kw::Export) => Err(self.not_yet("`export`")),
             Tok::Kw(Kw::Extern) => Err(self.not_yet("`extern`")),
             Tok::Kw(Kw::Immutable) => {
@@ -108,6 +108,40 @@ impl Parser {
             }
             _ => Err(self.unexpected("関数（`function`）かグローバル変数の宣言")),
         }
+    }
+
+    fn import(&mut self) -> PResult<Import> {
+        let lo = self.bump().span; // import
+        let target = match self.peek().clone() {
+            Tok::Ident(name) => {
+                self.bump();
+                ImportTarget::Std(name)
+            }
+            Tok::Str(path) => {
+                self.bump();
+                ImportTarget::File(String::from_utf8_lossy(&path).into_owned())
+            }
+            Tok::Lt => {
+                return Err(Diag::new(self.span(), "`import` に `< >` は使いません")
+                    .hint("標準ライブラリは `import stdio;` のように、名前だけを書きます"))
+            }
+            _ => {
+                return Err(self
+                    .unexpected("標準ライブラリの名前か、\"ファイル名.orz\"")
+                    .hint("例：import stdio;  import \"util.orz\";"))
+            }
+        };
+        let alias = if self.eat(&Tok::Kw(Kw::As)) {
+            Some(self.ident("名前空間の名前")?.0)
+        } else {
+            None
+        };
+        self.semi()?;
+        Ok(Import {
+            target,
+            alias,
+            span: lo.to(self.prev_span()),
+        })
     }
 
     fn func(&mut self) -> PResult<Func> {

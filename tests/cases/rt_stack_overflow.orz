@@ -1,4 +1,4 @@
-// runtime: スタックが溢れた可能性があります
+// runtime: スタックが溢れたか
 function 32 down(n:32) {
     return down(n + 1) + 1;
 }

@@ -1,0 +1,5 @@
+// runtime: rt_u8_overflow.orz:4: 計算の結果が 8 の範囲（0〜255）を超えました
+function nothing main() {
+    u:8 = 200;
+    u = u + 100;
+}

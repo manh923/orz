@@ -1,0 +1,18 @@
+// exit: 0
+import stdio;
+
+immutable GREETING:string = "こんにちは";
+name:string = "orz";
+last:maybe:string = null;
+
+function nothing set(n:string) {
+    last = name;
+    name = n;
+}
+
+function nothing main() {
+    stdio.print(GREETING + "、" + name);
+    set("土下座");
+    stdio.print(GREETING + "、" + name);
+    stdio.print(last);
+}

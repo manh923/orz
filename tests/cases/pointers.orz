@@ -1,0 +1,38 @@
+// exit: 0
+import stdio;
+
+function nothing main() {
+    p:pointer:32 = allocate(3 * size(:32));
+    stdio.print(p[0]);
+    p[0] = 10;
+    p[1] = -20;
+    p[2] = 2147483647;
+    stdio.print(p[0] + p[1]);
+    stdio.print(p[2]);
+    q:pointer:64 = allocate(2 * size(:64));
+    q[1] = 9223372036854775807;
+    stdio.print(q[1]);
+    r:pointer:8 = allocate(4);
+    r[0] = 255;
+    r[1] = 1;
+    stdio.print(r[0]);
+    // address で 4 バイト先を指す
+    a:address = to:address(p);
+    a = a + 4;
+    p2:pointer:32 = to:pointer:32(a);
+    stdio.print(p2[0]);
+    b:pointer:8 = bytes(to:address(p));
+    stdio.print(b[0]);
+    stdio.print(size(:8));
+    stdio.print(size(:32));
+    stdio.print(size(:64));
+    stdio.print(size(:bool));
+    stdio.print(size(:string));
+    stdio.print(size(:pointer:8));
+    stdio.print(size(:array:32));
+    n:64 = size(:64) * 2;
+    stdio.print(n);
+    pp:pointer:pointer:32 = allocate(size(:pointer:32));
+    pp[0] = p;
+    stdio.print(pp[0][1]);
+}

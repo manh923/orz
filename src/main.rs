@@ -19,6 +19,9 @@ use std::process::{exit, Command};
 
 use source::SourceFile;
 
+/// ランタイム（runtime/orz_runtime.c）をコンパイルしたもの。build.rs が作る。
+const RUNTIME_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime.o"));
+
 const USAGE: &str = "使い方:
   orz build ファイル.orz [-o 出力]   実行ファイルを作る
   orz run ファイル.orz               作って、すぐ実行する
@@ -114,9 +117,11 @@ fn assemble_and_link(asm: &str, out: &Path) {
     }
     let s = dir.join("out.s");
     let o = dir.join("out.o");
+    let rt = dir.join("orz_runtime.o");
     std::fs::write(&s, asm).expect("アセンブリを書けません");
+    std::fs::write(&rt, RUNTIME_OBJ).expect("ランタイムを書けません");
     run_tool(Command::new("as").arg("-o").arg(&o).arg(&s), "as");
-    run_tool(Command::new("ld").arg("-o").arg(out).arg(&o), "ld");
+    run_tool(Command::new("ld").arg("-o").arg(out).arg(&o).arg(&rt), "ld");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

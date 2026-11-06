@@ -1,0 +1,6 @@
+// error: `stdio` に `printf` はありません
+import stdio;
+
+function nothing main() {
+    stdio.printf("x");
+}

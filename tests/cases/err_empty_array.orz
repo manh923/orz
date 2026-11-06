@@ -1,0 +1,6 @@
+// error: 空の配列 `[]` は、型のわかる場所でだけ使えます
+import stdio;
+
+function nothing main() {
+    stdio.print([]);
+}

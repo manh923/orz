@@ -1,0 +1,6 @@
+// error: `string` 型の値は null になりません（maybe ではありません）
+function nothing main() {
+    s:string = "a";
+    if (s != null) {
+    }
+}

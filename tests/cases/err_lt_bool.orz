@@ -1,4 +1,4 @@
-// error: `bool` は `<` で大小を比べられません
+// error: `<` で大小を比べられるのは整数だけですが、この式は `bool` 型です
 function nothing main() {
     b:bool = true < false;
 }

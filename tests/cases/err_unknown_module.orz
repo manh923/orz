@@ -1,0 +1,5 @@
+// error: 標準ライブラリに `stdoi` はありません
+import stdoi;
+
+function nothing main() {
+}

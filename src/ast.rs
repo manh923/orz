@@ -72,6 +72,23 @@ pub struct Program {
 pub enum Item {
     Func(Func),
     Global(Decl),
+    Import(Import),
+}
+
+#[derive(Debug)]
+pub struct Import {
+    pub target: ImportTarget,
+    /// `as` で付けた名前。
+    pub alias: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum ImportTarget {
+    /// `import stdio;`（標準ライブラリ）
+    Std(String),
+    /// `import "util.orz";`（自分のファイル）
+    File(String),
 }
 
 #[derive(Debug)]

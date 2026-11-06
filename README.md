@@ -12,35 +12,47 @@ function 32 main() {
 
 ## 今できること
 
-実装の手順 1〜4 まで。
-
-- 型は `32` と `bool`
-- 変数（ブロック単位のスコープ）、`if`・`else if`・`else`、`while`・`break`・`continue`
-- 関数（再帰、定義より前からの呼び出し、7 個以上の引数）
-- グローバル変数と `immutable`
-- `+ - * / % ^`、`not`・符号の `-`、`and nand or nor xor xnor`（`bool` なら短絡評価）、`<< >>`、比較
-- 値がコンパイル時に決まる式のオーバーフロー・0 除算などは、コンパイルエラー
-- それ以外は実行時に検出して止まる（`実行時エラー: ファイル名:行: 理由`、終了コード 101）。再帰が深すぎてスタックが溢れたときも同じ
-- `main` の戻り値が終了コードになる
+実装の手順 1〜5 まで。
 
 ```
-function 32 fib(n:32) {
-    if (n < 2) {
-        return n;
+import stdio;
+
+function maybe:string find(names:array:string, target:string) {
+    i:32 = 0;
+    while (i < length(names)) {
+        if (names[i] == target) {
+            return names[i];
+        }
+        i = i + 1;
     }
-    return fib(n - 1) + fib(n - 2);
+    return null;
 }
 
-function 32 main() {
-    return fib(10);
+function nothing main() {
+    names:array:string = ["apple", "banana"];
+    found:maybe:string = find(names, "banana");
+    if (found != null) {
+        stdio.print("見つかった: " + found);
+    }
+    stdio.print(names);
 }
 ```
 
-文字列・配列・`print` などは、構文としては読めますが「まだ実装していません」のエラーになります（手順 5 以降）。
+- 型：`8`・`32`・`64`、`bool`、`string`、`array`、`pointer`、`address`、`maybe`（string・array・pointer に付けたもの）
+- 変数（ブロック単位のスコープ）、`if`・`else if`・`else`、`while`・`break`・`continue`
+- 関数（再帰、定義より前からの呼び出し、7 個以上の引数）、`main(args:array:string)`
+- グローバル変数と `immutable`
+- 文字列の `+`・`==`、配列（範囲チェックあり）、`allocate`・`size`・`bytes`・`to:型(x)`
+- `import stdio;` の `print`・`put`・`read_line`・`read_file`・`write_file`・`last_error`
+- `if (x != null)` などで、`maybe` を外して使える（絞り込み）
+- 値がコンパイル時に決まる式のオーバーフロー・0 除算などは、コンパイルエラー
+- それ以外は実行時に検出して止まる（`実行時エラー: ファイル名:行: 理由`、終了コード 101）。配列の範囲外、変換の範囲外、スタックの溢れなども同じ
+
+構造体・`decnum`・自分のファイルの `import` などは、構文としては読めますが「まだ実装していません」のエラーになります（手順 6 以降）。
 
 ## 使い方
 
-Rust と、x86-64 の Linux（binutils の `as` と `ld`）が必要です。
+x86-64 の Linux で動きます。作るときには Rust と C コンパイラ（ランタイム用）が、使うときには binutils（`as` と `ld`）が必要です。
 
 ```sh
 cargo build --release
@@ -63,6 +75,9 @@ cargo test
 | `// error: 文字列` | コンパイルエラーになり、その文字列が表示される |
 | `// runtime: 文字列` | 実行時エラーになり、その文字列が表示される |
 | `// flags: --no-fold` | 定数の畳み込みを切ってコンパイルする（数だけの式で実行時の検査を試すため） |
+| `// args: a b c` | 実行するときのコマンドライン引数 |
+
+同じ名前の `.out` があれば標準出力がその中身と同じかを確かめ、`.in` があれば標準入力に流します。
 
 ## 中身
 
@@ -72,4 +87,6 @@ cargo test
 | `src/parser.rs` | 構文解析 |
 | `src/sema.rs` | 型の確認と、中間表現（三番地コード）への変換 |
 | `src/fold.rs` | 定数の畳み込み。コンパイル時にわかる誤りはここで出す |
-| `src/x86.rs` | x86-64 のアセンブリを出す。C ライブラリは使わない |
+| `src/x86.rs` | x86-64 のアセンブリを出す |
+| `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わず、システムコールだけ |
+| `build.rs` | ランタイムをコンパイルして、コンパイラに埋め込む |

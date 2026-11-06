@@ -4,7 +4,8 @@
 //! そのため定数の畳み込みは、前から順に見るだけでできる。
 //! 何度も代入する値（ソースの変数、`and` の結果など）は `Var` に置く。
 //!
-//! 値はすべて 32bit。`bool` は 0 か 1。
+//! 値はすべて 8 バイトの場所に置く。`32` は符号を広げ、`8` と `bool` は 0 を詰めた形にそろえておく。
+//! アドレス（string・array・pointer・address）はそのまま 8 バイト。
 
 use crate::ast::IntTy;
 use crate::source::Span;
@@ -17,13 +18,36 @@ pub enum Operand {
     /// グローバル変数（`Program::globals` の番号）。
     Global(u32),
     Imm(i64),
+    /// 文字列リテラルのアドレス（`Program::strings` の番号）。
+    Str(u32),
 }
 
-/// 書き込み先。
+/// 変数の書き込み先。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
     Var(u32),
     Global(u32),
+}
+
+/// メモリ上の幅。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Width {
+    /// 1 バイト（読むときは 0 を詰める）。`8` と `bool`。
+    W1,
+    /// 4 バイト（読むときは符号を広げる）。`32`。
+    W4,
+    /// 8 バイト。`64` とアドレス。
+    W8,
+}
+
+impl Width {
+    pub fn bytes(self) -> i64 {
+        match self {
+            Width::W1 => 1,
+            Width::W4 => 4,
+            Width::W8 => 8,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +76,63 @@ pub enum CmpOp {
     Ge,
     Eq,
     Ne,
+}
+
+/// ランタイム（runtime/orz_runtime.c）の関数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rt {
+    /// (n) → n バイトのメモリ。中身は 0
+    Alloc,
+    /// (要素数, 要素の大きさ, 初期値の種類) → 配列
+    ArrayNew,
+    /// (底, 指数) → 累乗
+    Pow(IntTy),
+    /// (a, b) → a と b をつないだ文字列
+    Concat,
+    /// (a, b) → 中身が同じなら 1
+    StrEq,
+    StrFromInt,
+    StrFromBool,
+    PutInt,
+    PutAddr,
+    PutBool,
+    PutStr,
+    /// (配列, 型の説明)
+    PutArray,
+    Newline,
+    ReadLine,
+    ReadFile,
+    WriteFile,
+    LastError,
+}
+
+impl Rt {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Rt::Alloc => "orz_rt_alloc",
+            Rt::ArrayNew => "orz_rt_array_new",
+            Rt::Pow(_) => "orz_rt_pow",
+            Rt::Concat => "orz_rt_str_concat",
+            Rt::StrEq => "orz_rt_str_eq",
+            Rt::StrFromInt => "orz_rt_str_from_int",
+            Rt::StrFromBool => "orz_rt_str_from_bool",
+            Rt::PutInt => "orz_rt_put_int",
+            Rt::PutAddr => "orz_rt_put_addr",
+            Rt::PutBool => "orz_rt_put_bool",
+            Rt::PutStr => "orz_rt_put_str",
+            Rt::PutArray => "orz_rt_put_array",
+            Rt::Newline => "orz_rt_newline",
+            Rt::ReadLine => "orz_rt_read_line",
+            Rt::ReadFile => "orz_rt_read_file",
+            Rt::WriteFile => "orz_rt_write_file",
+            Rt::LastError => "orz_rt_last_error",
+        }
+    }
+
+    /// 実行時エラーのときに「ファイル名:行」を表示するために、場所を最後の引数で渡すか。
+    pub fn takes_site(self) -> bool {
+        matches!(self, Rt::Alloc | Rt::ArrayNew | Rt::Pow(_))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -83,12 +164,20 @@ pub enum Inst {
         dst: u32,
         a: Operand,
     },
-    /// `dst = (a op b)`。結果は 0 か 1。
+    /// `dst = (a op b)`。8 バイトの符号ありで比べる。結果は 0 か 1。
     Cmp {
         dst: u32,
         op: CmpOp,
         a: Operand,
         b: Operand,
+    },
+    /// 整数の型を変える。範囲に入らなければ実行時に止める。
+    Convert {
+        dst: u32,
+        from: IntTy,
+        to: IntTy,
+        a: Operand,
+        span: Span,
     },
     /// `dst = src`
     Copy {
@@ -100,11 +189,48 @@ pub enum Inst {
         place: Place,
         src: Operand,
     },
+    /// `dst = *addr`
+    Load {
+        dst: u32,
+        addr: Operand,
+        width: Width,
+    },
+    /// `*addr = src`
+    StoreMem {
+        addr: Operand,
+        src: Operand,
+        width: Width,
+    },
+    /// `dst = base + index * scale`
+    ElemAddr {
+        dst: u32,
+        base: Operand,
+        index: Operand,
+        scale: i64,
+    },
+    /// `0 <= index < 配列の長さ` でなければ実行時に止める。
+    CheckIndex {
+        array: Operand,
+        index: Operand,
+        span: Span,
+    },
+    /// `dst = 長さ`（string と array。先頭の手前の 8 バイト）
+    Length {
+        dst: u32,
+        a: Operand,
+    },
     /// 関数を呼ぶ。`func` は `Program::funcs` の番号。
     Call {
         dst: Option<u32>,
         func: u32,
         args: Vec<Operand>,
+    },
+    /// ランタイムの関数を呼ぶ。
+    CallRt {
+        dst: Option<u32>,
+        func: Rt,
+        args: Vec<Operand>,
+        span: Span,
     },
     Label(u32),
     Jump(u32),
@@ -129,20 +255,31 @@ pub struct Function {
     pub nvars: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstVal {
+    Int(i64),
+    /// 文字列リテラル（`Program::strings` の番号）。
+    Str(u32),
+}
+
 #[derive(Debug)]
 pub struct Global {
     pub name: String,
-    pub init: i64,
+    pub init: ConstVal,
 }
 
 #[derive(Debug)]
 pub struct Program {
     pub funcs: Vec<Function>,
     pub globals: Vec<Global>,
+    /// 文字列リテラル。
+    pub strings: Vec<Vec<u8>>,
     /// `main` の番号。
     pub main: u32,
     /// `main` が値を返すか（返すならそれが終了コード）。
     pub main_returns: bool,
+    /// `main` がコマンドライン引数を受け取るか。
+    pub main_takes_args: bool,
 }
 
 /// 実行時エラーの理由。コンパイル時と実行時で同じ言い方を使う。
@@ -157,19 +294,22 @@ pub enum Trap {
 impl Trap {
     pub fn message(self, ty: IntTy) -> String {
         match self {
-            Trap::Overflow => {
-                format!(
-                    "計算の結果が {} の範囲（{}〜{}）を超えました",
-                    ty.name(),
-                    min_of(ty),
-                    max_of(ty)
-                )
-            }
+            Trap::Overflow => format!("計算の結果が {}を超えました", range_text(ty)),
             Trap::DivZero => "0 で割りました".to_string(),
             Trap::NegExp => "整数の `^` の指数が負です".to_string(),
             Trap::ShiftRange => format!("シフトの量が 0〜{} の範囲の外です", bits_of(ty) - 1),
         }
     }
+}
+
+/// 「32 の範囲（-2147483648〜2147483647）」
+pub fn range_text(ty: IntTy) -> String {
+    format!("{} の範囲（{}〜{}）", ty.name(), min_of(ty), max_of(ty))
+}
+
+/// 変換で範囲外のときの文の後半。
+pub fn convert_message(to: IntTy) -> String {
+    format!("{}に入りません", range_text(to))
 }
 
 pub fn bits_of(ty: IntTy) -> u32 {

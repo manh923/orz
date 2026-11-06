@@ -1,0 +1,4 @@
+// error: `allocate` の結果は、pointer 型の場所に入れます
+function nothing main() {
+    x:32 = allocate(4);
+}

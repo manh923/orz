@@ -1,0 +1,13 @@
+// exit: 0
+import stdio;
+
+function nothing main() {
+    n:32 = 0;
+    line:maybe:string = stdio.read_line();
+    while (line != null) {
+        n = n + 1;
+        stdio.print(to:string(n) + ": [" + line + "]");
+        line = stdio.read_line();
+    }
+    stdio.print(stdio.read_line());
+}

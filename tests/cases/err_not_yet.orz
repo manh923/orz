@@ -1,5 +1,5 @@
-// error: この型はまだ実装していません（実装の手順 5 で対応）
+// error: 構造体はまだ実装していません（実装の手順 6 で対応）
 function 32 main() {
-    a:array:32 = [1, 2, 3];
+    p:Point = Point(1, 2);
     return 0;
 }

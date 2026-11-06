@@ -1,0 +1,5 @@
+// runtime: rt_array_negative.orz:4: 配列の長さ -5 が負です
+function nothing main() {
+    n:32 = 0 - 5;
+    a:array:32 = array(n);
+}

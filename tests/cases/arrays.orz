@@ -1,0 +1,64 @@
+// exit: 0
+import stdio;
+
+function nothing fill(a:array:32, v:32) {
+    i:32 = 0;
+    while (i < length(a)) {
+        a[i] = v + i;
+        i = i + 1;
+    }
+}
+
+function array:string names() {
+    return ["a", "b", "c"];
+}
+
+function 32 sum(a:array:32) {
+    s:32 = 0;
+    i:32 = 0;
+    while (i < length(a)) {
+        s = s + a[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+function nothing main() {
+    a:array:32 = [10, 20, 30];
+    a[1] = 25;
+    stdio.print(a);
+    stdio.print(length(a));
+    b:array:32 = array(4);
+    stdio.print(b);
+    fill(b, 100);
+    stdio.print(b);
+    stdio.print(sum(b));
+    c:array:32 = b;
+    c[0] = 0;
+    stdio.print(b[0]);
+    stdio.print(names());
+    s:array:string = array(2);
+    stdio.print(s);
+    stdio.print(length(s[0]));
+    nested:array:array:32 = [[1, 2], [3]];
+    nested[1][0] = 9;
+    stdio.print(nested);
+    e:array:array:32 = array(2);
+    stdio.print(e);
+    stdio.print(length(e[1]));
+    bools:array:bool = [true, false];
+    stdio.print(bools);
+    bytes8:array:8 = [0, 128, 255];
+    stdio.print(bytes8);
+    longs:array:64 = [9223372036854775807, -9223372036854775808];
+    stdio.print(longs);
+    maybes:array:maybe:string = [null, "x"];
+    stdio.print(maybes);
+    empty:array:32 = [];
+    stdio.print(empty);
+    stdio.print(length(empty));
+    i64:64 = 2;
+    stdio.print(a[i64]);
+    i8:8 = 0;
+    stdio.print(a[i8]);
+}

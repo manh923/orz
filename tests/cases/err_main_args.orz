@@ -1,3 +1,0 @@
-// error: `main` の引数はまだ実装していません（実装の手順 5 で対応）
-function nothing main(x:32) {
-}

@@ -1,0 +1,10 @@
+// error: null でないことを確かめるまで `length` は使えません
+import stdio;
+
+function nothing main() {
+    n:maybe:string = stdio.read_line();
+    while (n != null) {
+        n = stdio.read_line();
+        stdio.print(length(n));
+    }
+}
