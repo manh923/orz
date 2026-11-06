@@ -1,5 +1,7 @@
 // error: グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます
-a:array:32 = [1, 2];
+import stdio;
+
+line:maybe:string = stdio.read_line();
 
 function nothing main() {
 }

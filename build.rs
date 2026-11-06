@@ -25,6 +25,8 @@ fn main() {
             "-fno-asynchronous-unwind-tables",
             "-fno-tree-loop-distribute-patterns",
             "-fcf-protection=none",
+            // GC がスタックを調べるとき、%rsp より下（レッドゾーン）に値が隠れないように。
+            "-mno-red-zone",
             "-o",
         ])
         .arg(&out)

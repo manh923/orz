@@ -1,0 +1,15 @@
+// exit: 0
+// flags: --no-gc
+// GC を切っても、同じように動く（終了時にまとめて解放する）
+import stdio;
+
+function nothing main() {
+    s:string = "";
+    i:32 = 0;
+    while (i < 1000) {
+        s = s + "a";
+        i = i + 1;
+    }
+    collect();
+    stdio.print(length(s));
+}

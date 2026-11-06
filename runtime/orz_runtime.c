@@ -209,10 +209,17 @@ __attribute__((noreturn)) void orz_rt_panic_convert(const char *site, long value
 }
 
 // ---------------- メモリ ----------------
+//
+// 保守的なマーク・アンド・スイープのガベージコレクション（GC）。
+// スタック、グローバル変数、arena の中身から、ポインタに見える値をたどり、届かないものを解放する。
+//
+// ヒープは 1MB の塊（chunk）で、塊ごとに 1 つの大きさの区分のものだけを並べる。
+// 32KB を超えるものは、1 つずつ mmap する。どの塊のどの場所かは表から引けるので、
+// 途中を指すポインタ（bytes(s) や配列の要素のアドレス）からでも、元のものがわかる。
+//
+// arena の中で確保したものは GC を通らない。arena を抜けるときにまとめて返す。
 
-#define CHUNK (4L << 20)
-
-static char *heap_cur, *heap_end;
+#define SYS_munmap 11
 
 static void *map(long n, const char *site) {
     long p = sys6(SYS_mmap, 0, n, 3 /* 読み書き */, 0x22 /* MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
@@ -220,7 +227,340 @@ static void *map(long n, const char *site) {
     return (void *)p;
 }
 
-// n バイトを確保する。中身は 0。
+static void unmap(void *p, long n) { sys3(SYS_munmap, (long)p, n, 0); }
+
+#define GC_CHUNK (1L << 20)
+#define GC_HEADER (32L << 10) // 塊の先頭：3 つのビットマップ（確保済み・印・中を調べない）
+#define GC_LARGE (32L << 10)  // これより大きいものは 1 つずつ mmap する
+#define GC_MIN_THRESHOLD (8L << 20)
+
+static const long class_size[] = {
+    16,   32,   48,   64,   80,   96,   112,  128,   160,   192,   224,   256,   320,   384,
+    448,  512,  640,  768,  896,  1024, 1280, 1536,  1792,  2048,  2560,  3072,  3584,  4096,
+    5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384, 20480, 24576, 28672, 32768,
+};
+#define NCLASS ((int)(sizeof class_size / sizeof class_size[0]))
+
+struct chunk {
+    char *start, *end; // 中身の範囲
+    long objsize;      // 1 つの大きさ（大きいものは全体）
+    long nobj;
+    int cls;           // 大きさの区分（1 つずつ mmap したものは -1）
+    unsigned char *alloc, *mark, *noscan;
+    unsigned char large_bits[3];
+    char *map_start;
+    long map_len;
+};
+
+static struct chunk **chunks; // start の順に並べる
+static long nchunks, chunks_cap;
+static char *heap_lo = (char *)-1, *heap_hi;
+static void *freelist[NCLASS];
+static long gc_since, gc_threshold = GC_MIN_THRESHOLD;
+static char *stack_top;
+
+// コンパイラが出す：GC を動かさないか（--no-gc）、グローバル変数の範囲。
+extern const long orz_gc_disabled;
+extern char orz_globals_start[], orz_globals_end[];
+
+static int bit(const unsigned char *b, long i) { return (b[i >> 3] >> (i & 7)) & 1; }
+static void bit_set(unsigned char *b, long i) { b[i >> 3] |= (unsigned char)(1 << (i & 7)); }
+static void bit_clear(unsigned char *b, long i) { b[i >> 3] &= (unsigned char)~(1 << (i & 7)); }
+
+// 塊の情報を置く場所（GC の対象外）。
+static struct chunk *meta_free;
+static struct chunk *new_meta(void) {
+    if (meta_free) {
+        struct chunk *c = meta_free;
+        meta_free = *(struct chunk **)c;
+        memset(c, 0, sizeof *c);
+        return c;
+    }
+    static char *cur, *end;
+    if (end - cur < (long)sizeof(struct chunk)) {
+        cur = map(1L << 16, 0);
+        end = cur + (1L << 16);
+    }
+    struct chunk *c = (struct chunk *)cur;
+    cur += (sizeof(struct chunk) + 15) & ~15UL;
+    return c;
+}
+
+static void add_chunk(struct chunk *c) {
+    if (nchunks == chunks_cap) {
+        long cap = chunks_cap ? chunks_cap * 2 : 256;
+        struct chunk **n = map(cap * (long)sizeof *n, 0);
+        memcpy(n, chunks, nchunks * sizeof *n);
+        if (chunks) unmap(chunks, chunks_cap * (long)sizeof *n);
+        chunks = n;
+        chunks_cap = cap;
+    }
+    long i = nchunks;
+    while (i > 0 && chunks[i - 1]->start > c->start) {
+        chunks[i] = chunks[i - 1];
+        i--;
+    }
+    chunks[i] = c;
+    nchunks++;
+    if (c->start < heap_lo) heap_lo = c->start;
+    if (c->end > heap_hi) heap_hi = c->end;
+}
+
+static struct chunk *find_chunk(const char *p) {
+    if (p < heap_lo || p >= heap_hi) return 0;
+    long lo = 0, hi = nchunks - 1;
+    while (lo <= hi) {
+        long mid = (lo + hi) / 2;
+        struct chunk *c = chunks[mid];
+        if (p < c->start)
+            hi = mid - 1;
+        else if (p >= c->end)
+            lo = mid + 1;
+        else
+            return c;
+    }
+    return 0;
+}
+
+static void new_chunk(int cls, const char *site) {
+    char *m = map(GC_CHUNK, site);
+    struct chunk *c = new_meta();
+    c->objsize = class_size[cls];
+    c->nobj = (GC_CHUNK - GC_HEADER) / c->objsize;
+    c->cls = cls;
+    c->alloc = (unsigned char *)m;
+    c->mark = c->alloc + (8L << 10);
+    c->noscan = c->mark + (8L << 10);
+    c->start = m + GC_HEADER;
+    c->end = c->start + c->nobj * c->objsize;
+    c->map_start = m;
+    c->map_len = GC_CHUNK;
+    add_chunk(c);
+    // 空いているものをつなぐ（後ろから入れるので、前から使われる）。
+    for (long i = c->nobj - 1; i >= 0; i--) {
+        void **o = (void **)(c->start + i * c->objsize);
+        *o = freelist[cls];
+        freelist[cls] = o;
+    }
+}
+
+static int size_class(long n) {
+    int lo = 0, hi = NCLASS - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (class_size[mid] >= n)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return lo;
+}
+
+// ---- 印を付ける ----
+
+static void **mstack;
+static long msp, mcap;
+
+static void mark_ptr(const char *p) {
+    struct chunk *c = find_chunk(p);
+    if (!c) return;
+    long i = (p - c->start) / c->objsize;
+    if (i >= c->nobj || !bit(c->alloc, i) || bit(c->mark, i)) return;
+    bit_set(c->mark, i);
+    if (bit(c->noscan, i)) return;
+    if (msp == mcap) {
+        long cap = mcap ? mcap * 2 : 4096;
+        void **n = map(cap * (long)sizeof *n, 0);
+        memcpy(n, mstack, msp * sizeof *n);
+        if (mstack) unmap(mstack, mcap * (long)sizeof *n);
+        mstack = n;
+        mcap = cap;
+    }
+    mstack[msp++] = c->start + i * c->objsize;
+}
+
+static void scan_range(const char *lo, const char *hi) {
+    lo = (const char *)(((unsigned long)lo + 7) & ~7UL);
+    for (const char *p = lo; p + 8 <= hi; p += 8) mark_ptr(*(char *const *)p);
+}
+
+static void scan_arenas(void);
+
+void orz_rt_collect(void) {
+    if (orz_gc_disabled) return;
+    // 呼び出し元がレジスタに持っているかもしれないポインタを、スタックに書き出してから調べる。
+    long regs[6];
+    __asm__ volatile("movq %%rbx, 0(%0)\n\t"
+                     "movq %%rbp, 8(%0)\n\t"
+                     "movq %%r12, 16(%0)\n\t"
+                     "movq %%r13, 24(%0)\n\t"
+                     "movq %%r14, 32(%0)\n\t"
+                     "movq %%r15, 40(%0)"
+                     :
+                     : "r"(regs)
+                     : "memory");
+    char *sp;
+    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
+    scan_range(sp, stack_top);
+    scan_range(orz_globals_start, orz_globals_end);
+    scan_arenas();
+    while (msp > 0) {
+        char *o = mstack[--msp];
+        struct chunk *c = find_chunk(o);
+        scan_range(o, o + c->objsize);
+    }
+    __asm__ volatile("" : : "r"(regs) : "memory");
+
+    // 掃除：印のないものを解放し、空いているものをつなぎ直す。
+    for (int k = 0; k < NCLASS; k++) freelist[k] = 0;
+    long live = 0, kept = 0;
+    for (long j = 0; j < nchunks; j++) {
+        struct chunk *c = chunks[j];
+        long used = 0;
+        for (long i = 0; i < c->nobj; i++) {
+            if (bit(c->alloc, i) && !bit(c->mark, i)) bit_clear(c->alloc, i);
+            if (bit(c->alloc, i)) used++;
+        }
+        if (used == 0) {
+            // 何も残っていない塊は、OS に返す。
+            unmap(c->map_start, c->map_len);
+            *(struct chunk **)c = meta_free;
+            meta_free = c;
+            continue;
+        }
+        memset(c->mark, 0, (c->nobj + 7) / 8);
+        live += used * c->objsize;
+        if (c->cls >= 0) {
+            for (long i = c->nobj - 1; i >= 0; i--) {
+                if (!bit(c->alloc, i)) {
+                    void **o = (void **)(c->start + i * c->objsize);
+                    *o = freelist[c->cls];
+                    freelist[c->cls] = o;
+                }
+            }
+        }
+        chunks[kept++] = c;
+    }
+    nchunks = kept;
+    heap_lo = (char *)-1;
+    heap_hi = 0;
+    for (long j = 0; j < nchunks; j++) {
+        if (chunks[j]->start < heap_lo) heap_lo = chunks[j]->start;
+        if (chunks[j]->end > heap_hi) heap_hi = chunks[j]->end;
+    }
+    gc_since = 0;
+    gc_threshold = live * 2 > GC_MIN_THRESHOLD ? live * 2 : GC_MIN_THRESHOLD;
+}
+
+// ---- 確保 ----
+
+// GC のヒープから確保する。中身は 0。noscan なら、中にポインタがない（GC が中を調べない）。
+static void *gc_alloc(long n, int noscan, const char *site) {
+    if (n > (1L << 46)) orz_rt_panic(site, "メモリが足りません");
+    n += 1; // ちょうど終わりを指すポインタも、このものを指しているとみなせるように
+    if (gc_since >= gc_threshold) orz_rt_collect();
+    if (n > GC_LARGE) {
+        long len = (n + 4095) & ~4095L;
+        if (gc_since + len >= gc_threshold) orz_rt_collect();
+        char *m = map(len, site);
+        struct chunk *c = new_meta();
+        c->objsize = len;
+        c->nobj = 1;
+        c->cls = -1;
+        c->alloc = &c->large_bits[0];
+        c->mark = &c->large_bits[1];
+        c->noscan = &c->large_bits[2];
+        c->start = m;
+        c->end = m + len;
+        c->map_start = m;
+        c->map_len = len;
+        bit_set(c->alloc, 0);
+        if (noscan) bit_set(c->noscan, 0);
+        add_chunk(c);
+        gc_since += len;
+        return m;
+    }
+    int cls = size_class(n);
+    if (!freelist[cls]) new_chunk(cls, site);
+    void **o = freelist[cls];
+    freelist[cls] = *o;
+    struct chunk *c = find_chunk((char *)o);
+    long i = ((char *)o - c->start) / c->objsize;
+    bit_set(c->alloc, i);
+    if (noscan)
+        bit_set(c->noscan, i);
+    else
+        bit_clear(c->noscan, i);
+    memset(o, 0, c->objsize);
+    gc_since += c->objsize;
+    return o;
+}
+
+// ---- arena ----
+
+struct arena_block {
+    struct arena_block *next;
+    char *cur, *end;
+    long len;
+};
+
+static struct arena_block **arenas; // 開いている arena ごとの、ブロックのつながり
+static long narenas, arenas_cap;
+
+void orz_rt_arena_push(void) {
+    if (narenas == arenas_cap) {
+        long cap = arenas_cap ? arenas_cap * 2 : 64;
+        struct arena_block **n = map(cap * (long)sizeof *n, 0);
+        memcpy(n, arenas, narenas * sizeof *n);
+        if (arenas) unmap(arenas, arenas_cap * (long)sizeof *n);
+        arenas = n;
+        arenas_cap = cap;
+    }
+    arenas[narenas++] = 0;
+}
+
+void orz_rt_arena_pop(void) {
+    struct arena_block *b = arenas[--narenas];
+    while (b) {
+        struct arena_block *next = b->next;
+        unmap(b, b->len);
+        b = next;
+    }
+}
+
+static void *arena_alloc(long n, const char *site) {
+    if (n > (1L << 46)) orz_rt_panic(site, "メモリが足りません");
+    n = (n + 1 + 15) & ~15L;
+    struct arena_block *b = arenas[narenas - 1];
+    if (!b || b->end - b->cur < n) {
+        long len = n + (long)sizeof *b > (1L << 16) ? (n + (long)sizeof *b + 4095) & ~4095L : (1L << 16);
+        struct arena_block *nb = map(len, site);
+        nb->len = len;
+        nb->cur = (char *)nb + ((sizeof *nb + 15) & ~15UL);
+        nb->end = (char *)nb + len;
+        nb->next = b;
+        arenas[narenas - 1] = nb;
+        b = nb;
+    }
+    void *r = b->cur;
+    b->cur += n;
+    return r;
+}
+
+// arena の中身も GC の根にする（arena のものが GC のものを指していることがある）。
+static void scan_arenas(void) {
+    for (long k = 0; k < narenas; k++)
+        for (struct arena_block *b = arenas[k]; b; b = b->next)
+            scan_range((char *)b + ((sizeof *b + 15) & ~15UL), b->cur);
+}
+
+// 確保する。arena の中なら arena から、そうでなければ GC のヒープから。中身は 0。
+static void *alloc_obj(long n, int noscan, const char *site) {
+    if (narenas > 0) return arena_alloc(n, site);
+    return gc_alloc(n, noscan, site);
+}
+
+// allocate と構造体。中にポインタがあるかもしれないので、GC は中を調べる。
 void *orz_rt_alloc(long n, const char *site) {
     if (n < 0) {
         char a[24];
@@ -230,21 +570,11 @@ void *orz_rt_alloc(long n, const char *site) {
         err(" が渡されました");
         panic_end();
     }
-    if (n > (1L << 46)) orz_rt_panic(site, "メモリが足りません");
-    n = (n + 15) & ~15L;
-    if (n == 0) n = 16;
-    if (n > heap_end - heap_cur) {
-        if (n >= CHUNK / 4) return map(n, site);
-        heap_cur = map(CHUNK, site);
-        heap_end = heap_cur + CHUNK;
-    }
-    void *r = heap_cur;
-    heap_cur += n;
-    return r;
+    return alloc_obj(n, 0, site);
 }
 
 static char *new_str(long len) {
-    long *h = orz_rt_alloc(8 + len + 1, 0);
+    long *h = alloc_obj(8 + len + 1, 1, 0);
     h[0] = len;
     return (char *)(h + 1);
 }
@@ -255,8 +585,8 @@ static char *str_from(const char *p, long len) {
     return s;
 }
 
-// 配列を作る。kind：0 = 中身は 0、1 = 空の文字列、2 = 空の配列。
-void *orz_rt_array_new(long count, long elem_size, long kind, const char *site) {
+// 配列を作る。kind：0 = 中身は 0、1 = 空の文字列、2 = 空の配列。scan：要素にポインタがあるか。
+void *orz_rt_array_new(long count, long elem_size, long kind, long scan, const char *site) {
     if (count < 0) {
         char a[24];
         panic_begin(site);
@@ -266,7 +596,7 @@ void *orz_rt_array_new(long count, long elem_size, long kind, const char *site) 
         panic_end();
     }
     if (count > (1L << 40) / elem_size) orz_rt_panic(site, "メモリが足りません");
-    long *h = orz_rt_alloc(8 + count * elem_size, site);
+    long *h = alloc_obj(8 + count * elem_size, !scan, site);
     h[0] = count;
     void **data = (void **)(h + 1);
     if (kind == 1)
@@ -714,8 +1044,9 @@ char *orz_rt_str_from_dec(long v) {
     return str_from(buf, cstrlen(buf));
 }
 
+// maybe:32 などの箱。中身は変わらないので、arena の中でも GC のヒープに置く（arena を抜けても消えない）。
 void *orz_rt_box(long v) {
-    long *p = orz_rt_alloc(8, 0);
+    long *p = gc_alloc(8, 0, 0);
     *p = v;
     return p;
 }
@@ -984,14 +1315,14 @@ void orz_rt_put(long v, const char *desc) { put_value(desc, &v, 0); }
 // ---------------- 複製 ----------------
 
 void *orz_rt_copy(const void *p, long size) {
-    void *q = orz_rt_alloc(size, 0);
+    void *q = alloc_obj(size, 0, 0);
     memcpy(q, p, size);
     return q;
 }
 
-void *orz_rt_array_copy(const char *a, long elem_size) {
+void *orz_rt_array_copy(const char *a, long elem_size, long scan) {
     long n = ((const long *)a)[-1];
-    void *b = orz_rt_array_new(n, elem_size, 0, 0);
+    void *b = orz_rt_array_new(n, elem_size, 0, scan, 0);
     memcpy(b, a, n * elem_size);
     return b;
 }
@@ -1010,7 +1341,7 @@ static void buf_push(struct buf *b, const char *p, long n) {
     if (b->len + n > b->cap) {
         long cap = b->cap ? b->cap * 2 : 256;
         while (cap < b->len + n) cap *= 2;
-        char *q = orz_rt_alloc(cap, 0);
+        char *q = alloc_obj(cap, 1, 0);
         memcpy(q, b->p, b->len);
         b->p = q;
         b->cap = cap;
@@ -1187,7 +1518,7 @@ static char **g_argv;
 
 // コマンドライン引数を array:string にする。
 void *orz_rt_args(void) {
-    char **a = orz_rt_array_new(g_argc, 8, 0, 0);
+    char **a = orz_rt_array_new(g_argc, 8, 0, 1, 0);
     for (long i = 0; i < g_argc; i++) a[i] = str_from(g_argv[i], cstrlen(g_argv[i]));
     return a;
 }
@@ -1240,6 +1571,7 @@ long orz_entry(void);
 __attribute__((noreturn)) void orz_rt_start(long *sp) {
     g_argc = sp[0];
     g_argv = (char **)(sp + 1);
+    stack_top = (char *)sp;
     setup_signals();
     orz_rt_exit(orz_entry());
 }

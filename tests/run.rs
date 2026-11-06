@@ -4,7 +4,7 @@
 //!   // exit: 3          正しく動いて、終了コードが 3。定数の畳み込みあり・なしの両方で試す
 //!   // error: 文字列     コンパイルエラーになり、その文字列が表示される
 //!   // runtime: 文字列   実行時エラーになり、その文字列が表示される
-//!   // flags: --no-fold   定数の畳み込みを切ってコンパイルする（実行時の検査を試すため）
+//!   // flags: --no-fold   定数の畳み込みを切ってコンパイルする（実行時の検査を試すため）。ほかのオプションも書ける
 //!   // args: a b c       実行するときのコマンドライン引数
 //!
 //! 同じ名前の `.out` があれば、標準出力がその中身とぴったり同じかを確かめる。
@@ -48,6 +48,12 @@ fn build_and_run(case: &Path, dir: &Path, no_fold: bool, src: &str) -> Result<Ru
         .arg(&exe);
     if no_fold {
         cmd.arg("--no-fold");
+    }
+    // `// flags:` に書いたほかのオプション（--no-gc など）
+    for f in header(src, "flags:").unwrap_or_default().split_whitespace() {
+        if f != "--no-fold" {
+            cmd.arg(f);
+        }
     }
     let out = cmd.output().unwrap();
     if !out.status.success() {

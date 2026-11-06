@@ -96,7 +96,7 @@ pub enum CmpOp {
 pub enum Rt {
     /// (n) → n バイトのメモリ。中身は 0
     Alloc,
-    /// (要素数, 要素の大きさ, 初期値の種類) → 配列
+    /// (要素数, 要素の大きさ, 初期値の種類, 要素にポインタがあるか) → 配列
     ArrayNew,
     /// (底, 指数) → 累乗
     Pow(IntTy),
@@ -123,8 +123,15 @@ pub enum Rt {
     Box,
     /// (構造体, 大きさ) → 同じ中身の新しい構造体
     Copy,
-    /// (配列, 要素の大きさ) → 同じ中身の新しい配列
+    /// (配列, 要素の大きさ, 要素にポインタがあるか) → 同じ中身の新しい配列
     ArrayCopy,
+    /// GC を今すぐ動かす
+    Collect,
+    /// arena に入る・出る（次の変更で使う）
+    #[allow(dead_code)]
+    ArenaPush,
+    #[allow(dead_code)]
+    ArenaPop,
 }
 
 impl Rt {
@@ -149,6 +156,9 @@ impl Rt {
             Rt::Box => "orz_rt_box",
             Rt::Copy => "orz_rt_copy",
             Rt::ArrayCopy => "orz_rt_array_copy",
+            Rt::Collect => "orz_rt_collect",
+            Rt::ArenaPush => "orz_rt_arena_push",
+            Rt::ArenaPop => "orz_rt_arena_pop",
         }
     }
 
@@ -231,6 +241,8 @@ pub enum ConstVal {
     Str(u32),
     /// 値を入れた箱（`maybe:32` などの、null でない初期値）。
     Boxed(i64),
+    /// 配列や構造体のように確保が要るもの。`main` の前に、初期化の関数で入れる。
+    Deferred,
 }
 
 #[derive(Debug)]
@@ -254,6 +266,8 @@ pub struct Program {
     pub main_returns: bool,
     /// `main` がコマンドライン引数を受け取るか。
     pub main_takes_args: bool,
+    /// `main` の前に順に呼ぶ、グローバル変数の初期化の関数（`funcs` の番号）。
+    pub init_funcs: Vec<u32>,
 }
 
 /// 実行時エラーの理由。コンパイル時と実行時で同じ言い方を使う。

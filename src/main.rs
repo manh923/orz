@@ -25,7 +25,10 @@ const RUNTIME_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime
 const USAGE: &str = "使い方:
   orz build ファイル.orz [-o 出力]   実行ファイルを作る
   orz run ファイル.orz               作って、すぐ実行する
-  orz asm ファイル.orz [-o 出力.s]   アセンブリだけ出す（`-o -` なら画面に）";
+  orz asm ファイル.orz [-o 出力.s]   アセンブリだけ出す（`-o -` なら画面に）
+
+オプション:
+  --no-gc   GC を動かさず、終了時にまとめて解放する（すぐ終わるプログラム向け）";
 
 struct Options {
     cmd: String,
@@ -33,6 +36,8 @@ struct Options {
     output: Option<PathBuf>,
     /// 開発用：定数の畳み込みをしない（実行時の検査を試すため）。
     no_fold: bool,
+    /// GC を動かさない（終了時にまとめて解放する）。すぐ終わるプログラム向け。
+    no_gc: bool,
 }
 
 fn parse_args() -> Options {
@@ -49,6 +54,7 @@ fn parse_args() -> Options {
     let mut input = None;
     let mut output = None;
     let mut no_fold = false;
+    let mut no_gc = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => match args.next() {
@@ -59,6 +65,7 @@ fn parse_args() -> Options {
                 }
             },
             "--no-fold" => no_fold = true,
+            "--no-gc" => no_gc = true,
             _ if input.is_none() => input = Some(PathBuf::from(a)),
             _ => {
                 eprintln!("引数 `{}` の意味がわかりません\n{}", a, USAGE);
@@ -72,6 +79,7 @@ fn parse_args() -> Options {
         input,
         output,
         no_fold,
+        no_gc,
     }
 }
 
@@ -81,7 +89,7 @@ fn usage_exit() -> ! {
 }
 
 /// ソースからアセンブリを作る。エラーなら表示して終わる。
-fn compile(path: &Path, no_fold: bool) -> String {
+fn compile(path: &Path, no_fold: bool, no_gc: bool) -> String {
     let mut files = Files {
         srcs: Vec::new(),
         paths: Vec::new(),
@@ -97,7 +105,7 @@ fn compile(path: &Path, no_fold: bool) -> String {
             Ok(ir)
         });
     match result {
-        Ok(ir) => x86::emit(&ir, &files.srcs),
+        Ok(ir) => x86::emit(&ir, &files.srcs, no_gc),
         Err(d) => {
             let src = files.srcs.get(d.span.file as usize).unwrap_or(&files.srcs[0]);
             eprint!("{}", d.render(src));
@@ -214,7 +222,7 @@ fn run_tool(cmd: &mut Command, name: &str) {
 
 fn main() {
     let opt = parse_args();
-    let asm = compile(&opt.input, opt.no_fold);
+    let asm = compile(&opt.input, opt.no_fold, opt.no_gc);
     match opt.cmd.as_str() {
         "asm" => {
             let out = opt.output.unwrap_or_else(|| opt.input.with_extension("s"));

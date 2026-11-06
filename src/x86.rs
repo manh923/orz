@@ -19,9 +19,11 @@ use crate::source::{SourceFile, Span};
 
 const ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
 
-pub fn emit(prog: &ir::Program, srcs: &[SourceFile]) -> String {
+/// `gc_disabled` なら GC を動かさない（終了時にまとめて解放する）。
+pub fn emit(prog: &ir::Program, srcs: &[SourceFile], gc_disabled: bool) -> String {
     let mut g = Gen {
         out: String::new(),
+        gc_disabled,
         srcs,
         prog,
         func: 0,
@@ -29,6 +31,8 @@ pub fn emit(prog: &ir::Program, srcs: &[SourceFile]) -> String {
         sites: BTreeMap::new(),
         messages: HashMap::new(),
         traps: Vec::new(),
+        temp_slots: Vec::new(),
+        nslots: 0,
     };
     g.header();
     for (i, f) in prog.funcs.iter().enumerate() {
@@ -56,6 +60,7 @@ type Site = (u32, usize);
 
 struct Gen<'a> {
     out: String,
+    gc_disabled: bool,
     srcs: &'a [SourceFile],
     prog: &'a ir::Program,
     /// 今出している関数の番号。
@@ -67,6 +72,9 @@ struct Gen<'a> {
     messages: HashMap<String, u32>,
     /// 関数の後ろにまとめて置く、実行時エラーへの飛び先。（ラベル, 場所, 種類）
     traps: Vec<(u32, Site, TrapKind)>,
+    /// 今の関数の、一時変数の置き場所（番号）と、置き場所の数。
+    temp_slots: Vec<u32>,
+    nslots: u32,
 }
 
 macro_rules! asm {
@@ -101,6 +109,10 @@ impl<'a> Gen<'a> {
             asm!(self, "call orz_rt_args");
             asm!(self, "movq %rax, %rdi");
         }
+        // グローバル変数のうち、配列や構造体の初期値を入れる。
+        for &i in &self.prog.init_funcs {
+            asm!(self, "call {}", self.prog.funcs[i as usize].symbol);
+        }
         asm!(self, "call {}", main);
         if !self.prog.main_returns {
             asm!(self, "xorl %eax, %eax");
@@ -109,16 +121,16 @@ impl<'a> Gen<'a> {
         asm!(self, "ret");
     }
 
-    fn cur(&self) -> &'a ir::Function {
-        &self.prog.funcs[self.func]
+    fn slot(n: u32) -> String {
+        format!("-{}(%rbp)", (n + 1) * 8)
     }
 
-    fn temp_slot(t: u32) -> String {
-        format!("-{}(%rbp)", (t + 1) * 8)
+    fn temp_slot(&self, t: u32) -> String {
+        Self::slot(self.temp_slots[t as usize])
     }
 
     fn var_slot(&self, v: u32) -> String {
-        Self::temp_slot(self.cur().ntemps + v)
+        Self::slot(self.nslots + v)
     }
 
     fn global(&self, g: u32) -> String {
@@ -137,7 +149,10 @@ impl<'a> Gen<'a> {
         match op {
             Operand::Imm(v) if i32::try_from(v).is_ok() => asm!(self, "movq ${}, {}", v, reg),
             Operand::Imm(v) => asm!(self, "movabsq ${}, {}", v, reg),
-            Operand::Temp(t) => asm!(self, "movq {}, {}", Self::temp_slot(t), reg),
+            Operand::Temp(t) => {
+                let s = self.temp_slot(t);
+                asm!(self, "movq {}, {}", s, reg)
+            }
             Operand::Var(v) => {
                 let s = self.var_slot(v);
                 asm!(self, "movq {}, {}", s, reg)
@@ -155,7 +170,8 @@ impl<'a> Gen<'a> {
     }
 
     fn store_temp(&mut self, dst: u32) {
-        asm!(self, "movq %rax, {}", Self::temp_slot(dst));
+        let s = self.temp_slot(dst);
+        asm!(self, "movq %rax, {}", s);
     }
 
     fn block_label(&self, l: u32) -> String {
@@ -188,7 +204,8 @@ impl<'a> Gen<'a> {
     }
 
     fn function(&mut self, f: &ir::Function) {
-        let frame = ((f.ntemps + f.nvars) * 8).div_ceil(16) * 16;
+        (self.temp_slots, self.nslots) = assign_slots(f);
+        let frame = ((self.nslots + f.nvars) * 8).div_ceil(16) * 16;
         let _ = writeln!(self.out, "\n# function {}\n{}:", f.name, f.symbol);
         asm!(self, "pushq %rbp");
         asm!(self, "movq %rsp, %rbp");
@@ -831,6 +848,9 @@ impl<'a> Gen<'a> {
 
         let _ = writeln!(self.out, "\n\t.data");
         asm!(self, ".balign 8");
+        // GC はここからここまでを、グローバル変数として調べる。
+        asm!(self, ".globl orz_globals_start");
+        let _ = writeln!(self.out, "orz_globals_start:");
         let mut boxes = Vec::new();
         for g in &self.prog.globals {
             let _ = writeln!(self.out, "{}:", g.symbol);
@@ -841,12 +861,19 @@ impl<'a> Gen<'a> {
                     asm!(self, ".quad .Lbox{}", boxes.len());
                     boxes.push(v);
                 }
+                // main の前に、初期化の関数が入れる。
+                ConstVal::Deferred => asm!(self, ".quad 0"),
             }
         }
+        asm!(self, ".globl orz_globals_end");
+        let _ = writeln!(self.out, "orz_globals_end:");
         for (i, v) in boxes.iter().enumerate() {
             let _ = writeln!(self.out, ".Lbox{}:", i);
             asm!(self, ".quad {}", v);
         }
+        asm!(self, ".globl orz_gc_disabled");
+        let _ = writeln!(self.out, "orz_gc_disabled:");
+        asm!(self, ".quad {}", self.gc_disabled as i32);
         // 実行できるスタックは要らない、という印。
         let _ = writeln!(self.out, "\n\t.section .note.GNU-stack,\"\",@progbits");
     }
@@ -862,4 +889,115 @@ impl<'a> Gen<'a> {
             asm!(self, ".byte {}", chunk.join(","));
         }
     }
+}
+
+/// 命令が使う一時変数（`f(t, 定義か)` で知らせる）。
+fn each_temp(inst: &Inst, mut f: impl FnMut(u32, bool)) {
+    let use_op = |op: &Operand, f: &mut dyn FnMut(u32, bool)| {
+        if let Operand::Temp(t) = op {
+            f(*t, false);
+        }
+    };
+    let f: &mut dyn FnMut(u32, bool) = &mut f;
+    match inst {
+        Inst::Bin { dst, a, b, .. }
+        | Inst::Cmp { dst, a, b, .. }
+        | Inst::FBin { dst, a, b, .. }
+        | Inst::FCmp { dst, a, b, .. } => {
+            use_op(a, f);
+            use_op(b, f);
+            f(*dst, true);
+        }
+        Inst::Neg { dst, a, .. }
+        | Inst::Not { dst, a, .. }
+        | Inst::BoolNot { dst, a }
+        | Inst::Convert { dst, a, .. }
+        | Inst::FNeg { dst, a }
+        | Inst::IntToDec { dst, a }
+        | Inst::DecToInt { dst, a, .. }
+        | Inst::Length { dst, a } => {
+            use_op(a, f);
+            f(*dst, true);
+        }
+        Inst::Copy { dst, src } => {
+            use_op(src, f);
+            f(*dst, true);
+        }
+        Inst::Store { src, .. } => use_op(src, f),
+        Inst::Load { dst, addr, .. } => {
+            use_op(addr, f);
+            f(*dst, true);
+        }
+        Inst::StoreMem { addr, src, .. } => {
+            use_op(addr, f);
+            use_op(src, f);
+        }
+        Inst::ElemAddr { dst, base, index, .. } => {
+            use_op(base, f);
+            use_op(index, f);
+            f(*dst, true);
+        }
+        Inst::CheckIndex { array, index, .. } => {
+            use_op(array, f);
+            use_op(index, f);
+        }
+        Inst::Call { dst, args, .. } | Inst::CallRt { dst, args, .. } => {
+            for a in args {
+                use_op(a, f);
+            }
+            if let Some(d) = dst {
+                f(*d, true);
+            }
+        }
+        Inst::CallIndirect { dst, target, args } => {
+            use_op(target, f);
+            for a in args {
+                use_op(a, f);
+            }
+            if let Some(d) = dst {
+                f(*d, true);
+            }
+        }
+        Inst::Branch { cond, .. } => use_op(cond, f),
+        Inst::Ret(Some(v)) => use_op(v, f),
+        Inst::Ret(None) | Inst::Label(_) | Inst::Jump(_) => {}
+    }
+}
+
+/// 一時変数に置き場所を割り当てる。使い終わった（最後に使った後の）置き場所は、次の一時変数に回す。
+/// 一時変数は 1 つの文の中だけで使われ、ループの先頭に戻る道をまたいで生きることはないので、
+/// 命令を前から順に見るだけで、いつ使い終わるかがわかる。（置き場所の番号, 置き場所の数）
+fn assign_slots(f: &ir::Function) -> (Vec<u32>, u32) {
+    let n = f.ntemps as usize;
+    // 番号だけ取って使わなかった一時変数もあるので、出てこないものは None のまま。
+    let mut last_use: Vec<Option<usize>> = vec![None; n];
+    for (i, inst) in f.insts.iter().enumerate() {
+        each_temp(inst, |t, _| {
+            last_use[t as usize] = Some(last_use[t as usize].map_or(i, |x| x.max(i)))
+        });
+    }
+    let mut slot = vec![0u32; n];
+    let mut free: Vec<u32> = Vec::new();
+    let mut nslots = 0u32;
+    // その命令の後に空く一時変数
+    let mut ends: Vec<Vec<u32>> = vec![Vec::new(); f.insts.len()];
+    for (t, i) in last_use.iter().enumerate() {
+        if let Some(i) = *i {
+            ends[i].push(t as u32);
+        }
+    }
+    for (i, inst) in f.insts.iter().enumerate() {
+        each_temp(inst, |t, def| {
+            if def {
+                slot[t as usize] = free.pop().unwrap_or_else(|| {
+                    nslots += 1;
+                    nslots - 1
+                });
+            }
+        });
+        for &t in &ends[i] {
+            free.push(slot[t as usize]);
+        }
+    }
+    (slot, nslots)
 }

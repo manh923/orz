@@ -96,6 +96,11 @@ impl Ty {
         matches!(self, Ty::Int(_) | Ty::Bool | Ty::Address | Ty::Dec)
     }
 
+    /// 値の中にポインタがあるか（GC が中を調べる必要があるか）。数と bool だけはない。
+    fn has_pointers(&self) -> bool {
+        !matches!(self, Ty::Int(_) | Ty::Bool | Ty::Dec)
+    }
+
     fn contains_param(&self) -> bool {
         match self {
             Ty::Param(..) => true,
@@ -265,6 +270,8 @@ struct Ctx<'p> {
     struct_instances: HashMap<(usize, Vec<Ty>), usize>,
     strings: Vec<Vec<u8>>,
     string_ids: HashMap<Vec<u8>, u32>,
+    /// グローバル変数の初期化の関数（main の前に、この順に呼ぶ）。
+    global_inits: Vec<ir::Function>,
 }
 
 impl<'p> Ctx<'p> {
@@ -677,6 +684,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         struct_instances: HashMap::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
+        global_inits: Vec::new(),
     };
 
     // 1. import
@@ -890,10 +898,16 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         }
         lowered[i] = Some(f);
     }
-    let funcs: Vec<ir::Function> = lowered
+    let mut funcs: Vec<ir::Function> = lowered
         .into_iter()
         .map(|f| f.expect("すべての関数を変換済み"))
         .collect();
+    // グローバル変数の初期化の関数は、後ろに足す（main の前に、この順に呼ぶ）。
+    let mut init_funcs = Vec::new();
+    for f in std::mem::take(&mut ctx.global_inits) {
+        init_funcs.push(funcs.len() as u32);
+        funcs.push(f);
+    }
 
     let struct_descs = ctx
         .structs
@@ -931,6 +945,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         main: main as u32,
         main_returns,
         main_takes_args,
+        init_funcs,
     })
 }
 
@@ -1018,6 +1033,27 @@ impl<'p> Ctx<'p> {
         if !assignable(&ty, &vt) {
             return Err(mismatch(decl.init.span, &ty, &vt));
         }
+        if l.needs_init {
+            // 配列や構造体：main の前に実行する初期化の関数を作る。
+            let op = l.coerce(op, &vt, &ty, decl.init.span)?;
+            l.emit(Inst::Store {
+                place: Place::Global(i as u32),
+                src: op,
+            });
+            l.emit(Inst::Ret(None));
+            let f = ir::Function {
+                name: format!("グローバル変数 {} の初期化", decl.name),
+                symbol: format!("orz_init{}_{}", module, decl.name),
+                returns_value: false,
+                nparams: 0,
+                insts: std::mem::take(&mut l.insts),
+                ntemps: l.ntemps,
+                nvars: l.nvars,
+            };
+            self.global_inits.push(f);
+            self.globals[i].state = GlobalState::Done(ConstVal::Deferred);
+            return Ok(ConstVal::Deferred);
+        }
         let mut insts = std::mem::take(&mut l.insts);
         let v = fold::fold_const(&mut insts, op)?.ok_or_else(|| {
             Diag::new(
@@ -1076,6 +1112,8 @@ struct FnLower<'c, 'p> {
     narrowed: HashSet<u32>,
     /// 今の場所に来ることがあるか（`return` の後ろなどは来ない）。
     reachable: bool,
+    /// グローバル変数の初期値で、main の前に実行する必要がある（配列や構造体を作る）か。
+    needs_init: bool,
 }
 
 fn lower_func(ctx: &mut Ctx, index: usize) -> Result<ir::Function, Diag> {
@@ -1320,6 +1358,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             declared_somewhere: HashSet::new(),
             narrowed: HashSet::new(),
             reachable: true,
+            needs_init: false,
         }
     }
 
@@ -1362,11 +1401,30 @@ impl<'c, 'p> FnLower<'c, 'p> {
     /// ランタイムの関数を呼ぶ。グローバル変数の初期値では呼べない。
     fn rt(&mut self, func: Rt, args: Vec<Operand>, span: Span, returns: bool) -> Result<Option<u32>, Diag> {
         if self.const_ctx() {
-            return Err(Diag::new(
-                span,
-                "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
-            )
-            .hint("文字列の連結や配列・構造体づくりは、関数の中で行います"));
+            // 初期値では、値を作るだけのもの（配列・構造体・文字列）は使える。main の前に実行する。
+            let pure = matches!(
+                func,
+                Rt::Alloc
+                    | Rt::ArrayNew
+                    | Rt::Concat
+                    | Rt::StrFromInt
+                    | Rt::StrFromBool
+                    | Rt::StrFromDec
+                    | Rt::StrToInt
+                    | Rt::StrToDec
+                    | Rt::Box
+                    | Rt::Copy
+                    | Rt::ArrayCopy
+                    | Rt::Pow(_)
+            );
+            if !pure {
+                return Err(Diag::new(
+                    span,
+                    "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
+                )
+                .hint("表示や入出力は、関数の中で行います"));
+            }
+            self.needs_init = true;
         }
         let dst = if returns { Some(self.temp()) } else { None };
         self.emit(Inst::CallRt {
@@ -2170,8 +2228,19 @@ impl<'c, 'p> FnLower<'c, 'p> {
             match self.ctx.eval_global(i)? {
                 ConstVal::Int(v) => return Ok((Operand::Imm(v), ty)),
                 ConstVal::Str(s) => return Ok((Operand::Str(s), ty)),
-                // 箱に入った値は、グローバル変数の場所から読む。
-                ConstVal::Boxed(_) => {}
+                // 箱に入った値や、初期化の関数で入れる値は、グローバル変数の場所から読む。
+                ConstVal::Boxed(_) | ConstVal::Deferred => {
+                    if self.const_ctx() {
+                        // ほかのグローバル変数の初期化の中なら、それも main の前に実行する。
+                        self.needs_init = true;
+                        let dst = self.temp();
+                        self.emit(Inst::Copy {
+                            dst,
+                            src: Operand::Global(i as u32),
+                        });
+                        return Ok((Operand::Temp(dst), ty));
+                    }
+                }
             }
         } else if self.const_ctx() {
             return Err(Diag::new(
@@ -3049,10 +3118,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     }
                 }
                 if self.const_ctx() {
-                    return Err(Diag::new(
-                        e.span,
-                        "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
-                    ));
+                    // 長さは実行してわかるので、初期化の関数で計算する。
+                    self.needs_init = true;
                 }
                 let dst = self.temp();
                 self.emit(Inst::Length { dst, a: v });
@@ -3111,7 +3178,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     }
                     Ty::Array(elem) => {
                         let w = elem.width().bytes();
-                        self.rt_value(Rt::ArrayCopy, vec![v, Operand::Imm(w)], e.span)?
+                        let scan = Operand::Imm(elem.has_pointers() as i64);
+                        self.rt_value(Rt::ArrayCopy, vec![v, Operand::Imm(w), scan], e.span)?
                     }
                     Ty::Maybe(_) => {
                         return Err(maybe_hint(Diag::new(
@@ -3132,7 +3200,11 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ok(Some((r, t)))
             }
             "size" => Err(Diag::new(e.span, "`size` には型を書きます").hint("例：size(:32)")),
-            "collect" => Err(not_yet(e.span, "`collect`（ガベージコレクション）", 7)),
+            "collect" => {
+                self.arg_count(e, name, args, 0)?;
+                self.rt(Rt::Collect, vec![], e.span, false)?;
+                Ok(None)
+            }
             _ => unreachable!("組み込みの関数は上ですべて扱う"),
         }
     }
@@ -3332,6 +3404,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Operand::Imm(elems.len() as i64),
                 Operand::Imm(width.bytes()),
                 Operand::Imm(0),
+                Operand::Imm(elem.has_pointers() as i64),
             ],
             e.span,
         )?;
@@ -3393,7 +3466,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
         };
         let arr = self.rt_value(
             Rt::ArrayNew,
-            vec![nv, Operand::Imm(elem.width().bytes()), Operand::Imm(kind)],
+            vec![
+                nv,
+                Operand::Imm(elem.width().bytes()),
+                Operand::Imm(kind),
+                Operand::Imm(elem.has_pointers() as i64),
+            ],
             e.span,
         )?;
         Ok((arr, Ty::Array(Box::new(elem))))
