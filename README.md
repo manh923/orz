@@ -62,7 +62,7 @@ function nothing main() {
 
 ## 使い方
 
-x86-64 の Linux で動きます。作るときには Rust と C コンパイラ（ランタイム用）が、使うときには binutils（`as` と `ld`）が必要です。
+x86-64 の Linux と Windows で動きます。作るときには Rust と C コンパイラ（ランタイム用）が、使うときには binutils（`as` と `ld`）が必要です。
 
 ```sh
 cargo build --release
@@ -70,6 +70,20 @@ cargo build --release
 ./target/release/orz build three.orz -o three   # 実行ファイルを作る
 ./target/release/orz asm three.orz -o -         # アセンブリを画面に出す
 ```
+
+### Windows
+
+MinGW-w64 の gcc と binutils を使います。MSYS2 なら、MINGW64 のシェルで次のように入れます。
+
+```sh
+pacman -S mingw-w64-x86_64-gcc
+```
+
+C コンパイラが `cc` という名前で見つからなければ、`CC=gcc cargo build --release` のように指定します。`orz build three.orz` で `three.exe` ができます。
+
+### ほかの OS 向けに作る
+
+`--target linux` か `--target windows` で、ほかの OS 向けの実行ファイルを作れます。Linux から Windows 向けに作るには、orz を作るときに `x86_64-w64-mingw32-gcc` が、使うときに `x86_64-w64-mingw32-as` と `x86_64-w64-mingw32-ld` が要ります（Ubuntu なら `gcc-mingw-w64-x86-64`）。
 
 ## テスト
 
@@ -89,6 +103,8 @@ cargo test
 
 同じ名前の `.out` があれば標準出力がその中身と同じかを確かめ、`.in` があれば標準入力に流します。
 
+`ORZ_TEST_TARGET=windows cargo test` で、Windows 向けに作って wine で動かします（Linux の上で Windows 版を試すため）。
+
 ## 中身
 
 | ファイル | 役目 |
@@ -99,5 +115,5 @@ cargo test
 | `src/escape.rs` | arena の持ち出しの検査（関数をまたいで調べる） |
 | `src/fold.rs` | 定数の畳み込み。コンパイル時にわかる誤りはここで出す |
 | `src/x86.rs` | x86-64 のアセンブリを出す |
-| `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わず、システムコールだけ |
-| `build.rs` | ランタイムをコンパイルして、コンパイラに埋め込む |
+| `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わない。OS とのやりとり（Linux はシステムコール、Windows は kernel32）は「OS」の節にまとめてある |
+| `build.rs` | ランタイムを OS ごとにコンパイルして、コンパイラに埋め込む |

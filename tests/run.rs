@@ -9,6 +9,8 @@
 //!
 //! 同じ名前の `.out` があれば、標準出力がその中身とぴったり同じかを確かめる。
 //! 同じ名前の `.in` があれば、それを標準入力に流す。
+//!
+//! `ORZ_TEST_TARGET=windows` なら、Windows 向けに作って wine で動かす（Linux の上で Windows 版を試すため）。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,11 @@ const PANIC_EXIT_CODE: i32 = 101;
 
 fn orz() -> &'static str {
     env!("CARGO_BIN_EXE_orz")
+}
+
+/// Linux の上で、Windows 向けに作って wine で動かすか。
+fn on_wine() -> bool {
+    !cfg!(windows) && std::env::var("ORZ_TEST_TARGET").is_ok_and(|t| t == "windows")
 }
 
 fn header(src: &str, key: &str) -> Option<String> {
@@ -39,7 +46,17 @@ struct Run {
 /// 実行ファイルを作って実行する。コンパイルエラーなら Err（標準エラー出力）。
 fn build_and_run(case: &Path, dir: &Path, no_fold: bool, src: &str) -> Result<Run, String> {
     let stem = case.file_stem().unwrap().to_str().unwrap();
-    let exe = dir.join(format!("{}{}", stem, if no_fold { "-nofold" } else { "" }));
+    let suffix = if on_wine() {
+        ".exe"
+    } else {
+        std::env::consts::EXE_SUFFIX
+    };
+    let exe = dir.join(format!(
+        "{}{}{}",
+        stem,
+        if no_fold { "-nofold" } else { "" },
+        suffix
+    ));
     let mut cmd = Command::new(orz());
     cmd.current_dir(case.parent().unwrap())
         .arg("build")
@@ -48,6 +65,9 @@ fn build_and_run(case: &Path, dir: &Path, no_fold: bool, src: &str) -> Result<Ru
         .arg(&exe);
     if no_fold {
         cmd.arg("--no-fold");
+    }
+    if on_wine() {
+        cmd.args(["--target", "windows"]);
     }
     // `// flags:` に書いたほかのオプション（--no-gc など）
     for f in header(src, "flags:").unwrap_or_default().split_whitespace() {
@@ -67,7 +87,15 @@ fn build_and_run(case: &Path, dir: &Path, no_fold: bool, src: &str) -> Result<Ru
         .map(|a| a.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
     let input = std::fs::read(case.with_extension("in")).unwrap_or_default();
-    let mut child = Command::new(&exe)
+    let mut run = if on_wine() {
+        let mut c = Command::new("wine");
+        // 引数の日本語を wine が正しく読めるように、UTF-8 のロケールにする。
+        c.arg(&exe).env("WINEDEBUG", "-all").env("LANG", "C.UTF-8");
+        c
+    } else {
+        Command::new(&exe)
+    };
+    let mut child = run
         .args(&args)
         .current_dir(&work)
         .stdin(Stdio::piped())

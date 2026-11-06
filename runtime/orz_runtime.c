@@ -1,7 +1,9 @@
-// orz のランタイム（x86-64 Linux）。
+// orz のランタイム（x86-64 の Linux と Windows）。
 //
-// C ライブラリは使わず、システムコールだけを使う（-ffreestanding でコンパイルする）。
+// C ライブラリは使わない（-ffreestanding でコンパイルする）。OS とのやりとりは「OS」の節にまとめてある。
+// Linux ではシステムコール、Windows では kernel32 の関数を使う。
 // コンパイラが出したアセンブリから、C と同じ呼び出し方（System V ABI）で呼ばれる。
+// Windows でも、-mabi=sysv でコンパイルして同じ呼び出し方にする（kernel32 の関数だけ Windows の呼び出し方）。
 //
 // 値の持ち方：
 //   string  先頭のバイトを指すアドレス。長さはその手前の 8 バイトにあり、最後に 0 が付いている
@@ -9,13 +11,49 @@
 //
 // メモリは確保するだけで、プログラムの終わりにまとめて解放する（GC は実装の手順 7 で入れる）。
 
-typedef unsigned long usize;
+typedef long long i64;
+typedef unsigned long long u64;
+typedef u64 usize;
+
+#define PANIC_EXIT_CODE 101
+
+// ---------------- OS ----------------
+//
+// 失敗したときは負の値（-エラーの番号）を返す。番号は Linux の errno にそろえる。
+// fd の 0・1・2 は、標準入力・標準出力・標準エラー出力。
+
+#define ENOENT 2
+#define EINTR 4
+#define EACCES 13
+#define EEXIST 17
+#define ENOTDIR 20
+#define EISDIR 21
+#define EMFILE 24
+#define ENOSPC 28
+#define EROFS 30
+#define ENAMETOOLONG 36
+// これより大きい番号は、Windows のエラーの番号に足したもの。
+#define WIN_ERROR_BASE 100000
+
+void *memcpy(void *d, const void *s, usize n);
+static i64 os_write(i64 fd, const char *p, i64 n);
+static i64 os_read(i64 fd, char *p, i64 n);
+static i64 os_open_read(const char *path);
+static i64 os_open_write(const char *path);
+static i64 os_close(i64 fd);
+// 0 で埋めたメモリ。失敗なら 0。
+static void *os_map(i64 n);
+static void os_unmap(void *p, i64 n);
+__attribute__((noreturn)) static void os_exit(i64 code);
+
+#ifndef _WIN32
 
 #define SYS_read 0
 #define SYS_write 1
 #define SYS_open 2
 #define SYS_close 3
 #define SYS_mmap 9
+#define SYS_munmap 11
 #define SYS_rt_sigaction 13
 #define SYS_sigaltstack 131
 #define SYS_exit_group 231
@@ -26,33 +64,294 @@ typedef unsigned long usize;
 #define O_TRUNC 01000
 #define O_CLOEXEC 02000000
 
-#define EINTR 4
-#define PANIC_EXIT_CODE 101
-
-static long sys3(long n, long a, long b, long c) {
-    long r;
+static i64 sys3(i64 n, i64 a, i64 b, i64 c) {
+    i64 r;
     __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
     return r;
 }
 
-static long sys4(long n, long a, long b, long c, long d) {
-    long r;
-    register long r10 __asm__("r10") = d;
+static i64 sys4(i64 n, i64 a, i64 b, i64 c, i64 d) {
+    i64 r;
+    register i64 r10 __asm__("r10") = d;
     __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10) : "rcx", "r11", "memory");
     return r;
 }
 
-static long sys6(long n, long a, long b, long c, long d, long e, long f) {
-    long r;
-    register long r10 __asm__("r10") = d;
-    register long r8 __asm__("r8") = e;
-    register long r9 __asm__("r9") = f;
+static i64 sys6(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
+    i64 r;
+    register i64 r10 __asm__("r10") = d;
+    register i64 r8 __asm__("r8") = e;
+    register i64 r9 __asm__("r9") = f;
     __asm__ volatile("syscall"
                      : "=a"(r)
                      : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
                      : "rcx", "r11", "memory");
     return r;
 }
+
+static i64 os_write(i64 fd, const char *p, i64 n) {
+    i64 r;
+    do r = sys3(SYS_write, fd, (i64)p, n);
+    while (r == -EINTR);
+    return r;
+}
+
+static i64 os_read(i64 fd, char *p, i64 n) {
+    i64 r;
+    do r = sys3(SYS_read, fd, (i64)p, n);
+    while (r == -EINTR);
+    return r;
+}
+
+static i64 os_open_read(const char *path) { return sys4(SYS_open, (i64)path, O_RDONLY | O_CLOEXEC, 0, 0); }
+
+static i64 os_open_write(const char *path) {
+    return sys4(SYS_open, (i64)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644, 0);
+}
+
+static i64 os_close(i64 fd) { return sys3(SYS_close, fd, 0, 0); }
+
+static void *os_map(i64 n) {
+    i64 p = sys6(SYS_mmap, 0, n, 3 /* 読み書き */, 0x22 /* MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
+    return p < 0 && p > -4096 ? 0 : (void *)p;
+}
+
+static void os_unmap(void *p, i64 n) { sys3(SYS_munmap, (i64)p, n, 0); }
+
+__attribute__((noreturn)) static void os_exit(i64 code) {
+    for (;;) sys3(SYS_exit_group, code, 0, 0);
+}
+
+#else // _WIN32
+
+#define WINAPI __attribute__((ms_abi))
+#define IMPORT __declspec(dllimport)
+typedef void *HANDLE;
+typedef unsigned int u32;
+typedef unsigned short u16;
+
+IMPORT HANDLE WINAPI GetStdHandle(u32 which);
+IMPORT int WINAPI GetConsoleMode(HANDLE h, u32 *mode);
+IMPORT int WINAPI WriteConsoleW(HANDLE h, const u16 *p, u32 n, u32 *done, void *reserved);
+IMPORT int WINAPI ReadConsoleW(HANDLE h, u16 *p, u32 n, u32 *done, void *control);
+IMPORT int WINAPI WriteFile(HANDLE h, const void *p, u32 n, u32 *done, void *overlapped);
+IMPORT int WINAPI ReadFile(HANDLE h, void *p, u32 n, u32 *done, void *overlapped);
+IMPORT HANDLE WINAPI CreateFileW(const u16 *path, u32 access, u32 share, void *security, u32 how, u32 flags,
+                                 HANDLE tmpl);
+IMPORT u32 WINAPI GetFileAttributesW(const u16 *path);
+IMPORT int WINAPI CloseHandle(HANDLE h);
+IMPORT void *WINAPI VirtualAlloc(void *p, usize n, u32 type, u32 protect);
+IMPORT int WINAPI VirtualFree(void *p, usize n, u32 type);
+IMPORT __attribute__((noreturn)) void WINAPI ExitProcess(u32 code);
+IMPORT u16 *WINAPI GetCommandLineW(void);
+IMPORT int WINAPI WideCharToMultiByte(u32 cp, u32 flags, const u16 *w, int nw, char *s, int ns, const char *def,
+                                      int *used);
+IMPORT int WINAPI MultiByteToWideChar(u32 cp, u32 flags, const char *s, int ns, u16 *w, int nw);
+IMPORT void *WINAPI AddVectoredExceptionHandler(u32 first, i64(WINAPI *handler)(void *info));
+IMPORT int WINAPI SetThreadStackGuarantee(u32 *size);
+IMPORT u32 WINAPI GetLastError(void);
+
+#define CP_UTF8 65001
+
+// Windows のエラーの番号を、Linux の errno にそろえる。
+static i64 win_errno(u32 e) {
+    switch (e) {
+    case 2:   // ERROR_FILE_NOT_FOUND
+    case 3:   // ERROR_PATH_NOT_FOUND
+    case 15:  // ERROR_INVALID_DRIVE
+    case 53:  // ERROR_BAD_NETPATH
+    case 67:  // ERROR_BAD_NET_NAME
+    case 123: // ERROR_INVALID_NAME
+        return ENOENT;
+    case 5:  // ERROR_ACCESS_DENIED
+    case 32: // ERROR_SHARING_VIOLATION
+    case 33: // ERROR_LOCK_VIOLATION
+        return EACCES;
+    case 80:  // ERROR_FILE_EXISTS
+    case 183: // ERROR_ALREADY_EXISTS
+        return EEXIST;
+    case 267: // ERROR_DIRECTORY
+        return ENOTDIR;
+    case 4: // ERROR_TOO_MANY_OPEN_FILES
+        return EMFILE;
+    case 39:  // ERROR_HANDLE_DISK_FULL
+    case 112: // ERROR_DISK_FULL
+        return ENOSPC;
+    case 19: // ERROR_WRITE_PROTECT
+        return EROFS;
+    case 111: // ERROR_BUFFER_OVERFLOW
+    case 206: // ERROR_FILENAME_EXCED_RANGE
+        return ENAMETOOLONG;
+    default:
+        return WIN_ERROR_BASE + e;
+    }
+}
+
+static HANDLE os_handle(i64 fd) {
+    // STD_INPUT_HANDLE（-10）、STD_OUTPUT_HANDLE（-11）、STD_ERROR_HANDLE（-12）
+    if (fd >= 0 && fd <= 2) return GetStdHandle((u32)(-10 - fd));
+    return (HANDLE)fd;
+}
+
+static int is_console(HANDLE h) {
+    u32 mode;
+    return GetConsoleMode(h, &mode) != 0;
+}
+
+// 画面には、UTF-8 を UTF-16 にして書く（コードページによらず、日本語がそのまま出る）。
+// 文字の途中で切れたバイトは、次に書くときまで取っておく。
+static char carry[3][4];
+static int ncarry[3];
+static u16 wbuf[4096];
+
+static int utf8_len(unsigned char c) { return c < 0x80 ? 1 : c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1; }
+
+static void console_write(HANDLE h, i64 fd, const char *p, i64 n) {
+    char tmp[sizeof wbuf / sizeof wbuf[0]];
+    while (n > 0 || ncarry[fd] > 0) {
+        i64 k = ncarry[fd];
+        memcpy(tmp, carry[fd], k);
+        ncarry[fd] = 0;
+        i64 take = n < (i64)sizeof tmp - k ? n : (i64)sizeof tmp - k;
+        memcpy(tmp + k, p, take);
+        p += take;
+        n -= take;
+        k += take;
+        // 最後の文字が途中で切れていれば、取っておく。
+        i64 last = k;
+        while (last > 0 && last > k - 4 && ((unsigned char)tmp[last - 1] & 0xc0) == 0x80) last--;
+        if (last > 0 && last - 1 + utf8_len((unsigned char)tmp[last - 1]) > k) {
+            ncarry[fd] = (int)(k - (last - 1));
+            memcpy(carry[fd], tmp + last - 1, ncarry[fd]);
+            k = last - 1;
+            if (n == 0 && k == 0) return;
+        }
+        int w = MultiByteToWideChar(CP_UTF8, 0, tmp, (int)k, wbuf, sizeof wbuf / sizeof wbuf[0]);
+        for (int off = 0; off < w;) {
+            u32 done = 0;
+            if (!WriteConsoleW(h, wbuf + off, (u32)(w - off), &done, 0) || done == 0) return;
+            off += (int)done;
+        }
+        if (n == 0) return;
+    }
+}
+
+static i64 os_write(i64 fd, const char *p, i64 n) {
+    HANDLE h = os_handle(fd);
+    if ((fd == 1 || fd == 2) && is_console(h)) {
+        console_write(h, fd, p, n);
+        return n;
+    }
+    u32 done = 0;
+    if (!WriteFile(h, p, (u32)(n < 0x40000000 ? n : 0x40000000), &done, 0)) return -win_errno(GetLastError());
+    return done;
+}
+
+// 画面から読むときは UTF-16 で読んで、UTF-8 にする。行の先頭の Ctrl+Z は入力の終わり。
+static i64 console_read(HANDLE h, char *p, i64 n) {
+    i64 cap = (i64)(sizeof wbuf / sizeof wbuf[0]);
+    u32 max = (u32)(n / 3 < cap ? n / 3 : cap);
+    u32 got = 0;
+    if (max < 2) max = 2;
+    if (!ReadConsoleW(h, wbuf, max - 1, &got, 0)) return -win_errno(GetLastError());
+    if (got > 0 && wbuf[got - 1] >= 0xd800 && wbuf[got - 1] < 0xdc00) {
+        // サロゲートペアの前半で切れたら、後半も読む。
+        u32 more = 0;
+        if (ReadConsoleW(h, wbuf + got, 1, &more, 0)) got += more;
+    }
+    if (got == 0 || wbuf[0] == 0x1a) return 0;
+    return WideCharToMultiByte(CP_UTF8, 0, wbuf, (int)got, p, (int)n, 0, 0);
+}
+
+static i64 os_read(i64 fd, char *p, i64 n) {
+    HANDLE h = os_handle(fd);
+    if (fd == 0 && is_console(h)) return console_read(h, p, n);
+    u32 done = 0;
+    if (!ReadFile(h, p, (u32)(n < 0x40000000 ? n : 0x40000000), &done, 0)) {
+        u32 e = GetLastError();
+        if (e == 109 /* ERROR_BROKEN_PIPE */ || e == 38 /* ERROR_HANDLE_EOF */) return 0;
+        return -win_errno(e);
+    }
+    return done;
+}
+
+// パス（UTF-8 の orz の文字列）を UTF-16 にする。
+static u16 wpath[32768];
+
+static int to_wide(const char *path) {
+    i64 n = ((const i64 *)path)[-1];
+    if (n == 0) {
+        wpath[0] = 0;
+        return 1;
+    }
+    if (n > 32767) return 0;
+    int w = MultiByteToWideChar(CP_UTF8, 0, path, (int)n, wpath, 32767);
+    if (w <= 0) return 0;
+    wpath[w] = 0;
+    return 1;
+}
+
+static i64 open_error(void) {
+    u32 e = GetLastError();
+    // フォルダを開こうとすると「アクセスが拒否されました」になるので、見分ける。
+    if (e == 5) {
+        u32 a = GetFileAttributesW(wpath);
+        if (a != 0xffffffffu && (a & 0x10 /* FILE_ATTRIBUTE_DIRECTORY */)) return -EISDIR;
+    }
+    return -win_errno(e);
+}
+
+static i64 os_open_read(const char *path) {
+    if (!to_wide(path)) return -ENAMETOOLONG;
+    // GENERIC_READ、ほかのプログラムも読み書きできるように、OPEN_EXISTING、FILE_ATTRIBUTE_NORMAL
+    HANDLE h = CreateFileW(wpath, 0x80000000u, 3, 0, 3, 0x80, 0);
+    if (h == (HANDLE)-1) return open_error();
+    return (i64)h;
+}
+
+static i64 os_open_write(const char *path) {
+    if (!to_wide(path)) return -ENAMETOOLONG;
+    // GENERIC_WRITE、ほかのプログラムも読めるように、CREATE_ALWAYS、FILE_ATTRIBUTE_NORMAL
+    HANDLE h = CreateFileW(wpath, 0x40000000u, 1, 0, 2, 0x80, 0);
+    if (h == (HANDLE)-1) return open_error();
+    return (i64)h;
+}
+
+static i64 os_close(i64 fd) { return CloseHandle((HANDLE)fd) ? 0 : -win_errno(GetLastError()); }
+
+// MEM_COMMIT | MEM_RESERVE、PAGE_READWRITE
+static void *os_map(i64 n) { return VirtualAlloc(0, (usize)n, 0x3000, 4); }
+
+// MEM_RELEASE（確保したときの先頭を渡す）
+static void os_unmap(void *p, i64 n) {
+    (void)n;
+    VirtualFree(p, 0, 0x8000);
+}
+
+// 終了コードは Linux と同じく 0〜255。
+__attribute__((noreturn)) static void os_exit(i64 code) { ExitProcess((u32)(code & 255)); }
+
+// gcc は、4KB より大きいスタックを使う関数の先頭でこれを呼ぶ（スタックを 1 ページずつ触って広げる）。
+// コンパイラが出すアセンブリも、大きな関数では同じように呼ぶ。%rax に大きさ。%rsp は変えない。
+__asm__(".text\n"
+        ".globl ___chkstk_ms\n"
+        "___chkstk_ms:\n"
+        "\tpushq %rcx\n"
+        "\tpushq %rax\n"
+        "\tleaq 24(%rsp), %rcx\n"
+        "1:\tcmpq $0x1000, %rax\n"
+        "\tjb 2f\n"
+        "\tsubq $0x1000, %rcx\n"
+        "\torq $0, (%rcx)\n"
+        "\tsubq $0x1000, %rax\n"
+        "\tjmp 1b\n"
+        "2:\tsubq %rax, %rcx\n"
+        "\torq $0, (%rcx)\n"
+        "\tpopq %rax\n"
+        "\tpopq %rcx\n"
+        "\tret\n");
+
+#endif // _WIN32
 
 // gcc は構造体のコピーなどで、これらを勝手に呼ぶことがある。
 void *memcpy(void *d, const void *s, usize n) {
@@ -75,8 +374,8 @@ int memcmp(const void *a, const void *b, usize n) {
     return 0;
 }
 
-static long cstrlen(const char *s) {
-    long n = 0;
+static i64 cstrlen(const char *s) {
+    i64 n = 0;
     while (s[n]) n++;
     return n;
 }
@@ -84,25 +383,24 @@ static long cstrlen(const char *s) {
 // ---------------- 長さの付いた文字列 ----------------
 
 #define STATIC_STR(name, lit) \
-    static struct { long len; char s[sizeof(lit)]; } __attribute__((aligned(8))) name = {sizeof(lit) - 1, lit}
+    static struct { i64 len; char s[sizeof(lit)]; } __attribute__((aligned(8))) name = {sizeof(lit) - 1, lit}
 
 STATIC_STR(str_empty, "");
 STATIC_STR(str_true, "true");
 STATIC_STR(str_false, "false");
 
-static struct { long len; long data[1]; } __attribute__((aligned(8))) empty_array = {0, {0}};
+static struct { i64 len; i64 data[1]; } __attribute__((aligned(8))) empty_array = {0, {0}};
 
-static long str_len(const char *s) { return ((const long *)s)[-1]; }
+static i64 str_len(const char *s) { return ((const i64 *)s)[-1]; }
 
 // ---------------- 出力（バッファ付き） ----------------
 
 static char outbuf[8192];
-static long outlen;
+static i64 outlen;
 
-static void write_all(int fd, const char *p, long n) {
+static void write_all(int fd, const char *p, i64 n) {
     while (n > 0) {
-        long r = sys3(SYS_write, fd, (long)p, n);
-        if (r == -EINTR) continue;
+        i64 r = os_write(fd, p, n);
         if (r <= 0) return;
         p += r;
         n -= r;
@@ -114,10 +412,10 @@ void orz_rt_flush(void) {
     outlen = 0;
 }
 
-static void out(const char *p, long n) {
-    if (n > (long)sizeof outbuf - outlen) {
+static void out(const char *p, i64 n) {
+    if (n > (i64)sizeof outbuf - outlen) {
         orz_rt_flush();
-        if (n >= (long)sizeof outbuf) {
+        if (n >= (i64)sizeof outbuf) {
             write_all(1, p, n);
             return;
         }
@@ -131,10 +429,10 @@ static void outs(const char *s) { out(s, cstrlen(s)); }
 static void err(const char *s) { write_all(2, s, cstrlen(s)); }
 
 // 数を 10 進の文字列にする。buf は 21 バイト以上。最小値も正しく扱う。
-static char *fmt_long(char *buf, long v) {
+static char *fmt_long(char *buf, i64 v) {
     char *p = buf + 21;
     *--p = 0;
-    unsigned long u = v < 0 ? -(unsigned long)v : (unsigned long)v;
+    u64 u = v < 0 ? -(u64)v : (u64)v;
     do {
         *--p = (char)('0' + u % 10);
         u /= 10;
@@ -143,7 +441,7 @@ static char *fmt_long(char *buf, long v) {
     return p;
 }
 
-static char *fmt_hex(char *buf, unsigned long v) {
+static char *fmt_hex(char *buf, u64 v) {
     char *p = buf + 21;
     *--p = 0;
     do {
@@ -157,13 +455,9 @@ static char *fmt_hex(char *buf, unsigned long v) {
 
 // ---------------- 終了と実行時エラー ----------------
 
-__attribute__((noreturn)) static void sys_exit(long code) {
-    for (;;) sys3(SYS_exit_group, code, 0, 0);
-}
-
-__attribute__((noreturn)) void orz_rt_exit(long code) {
+__attribute__((noreturn)) void orz_rt_exit(i64 code) {
     orz_rt_flush();
-    sys_exit(code);
+    os_exit(code);
 }
 
 static void panic_begin(const char *site) {
@@ -177,7 +471,7 @@ static void panic_begin(const char *site) {
 
 __attribute__((noreturn)) static void panic_end(void) {
     err("\n");
-    sys_exit(PANIC_EXIT_CODE);
+    os_exit(PANIC_EXIT_CODE);
 }
 
 __attribute__((noreturn)) void orz_rt_panic(const char *site, const char *reason) {
@@ -186,7 +480,7 @@ __attribute__((noreturn)) void orz_rt_panic(const char *site, const char *reason
     panic_end();
 }
 
-__attribute__((noreturn)) void orz_rt_panic_index(const char *site, long index, long len) {
+__attribute__((noreturn)) void orz_rt_panic_index(const char *site, i64 index, i64 len) {
     char a[24], b[24];
     panic_begin(site);
     err("配列の範囲外です（添字 ");
@@ -198,7 +492,7 @@ __attribute__((noreturn)) void orz_rt_panic_index(const char *site, long index, 
 }
 
 // 変換で範囲外。reason は「8 の範囲（0〜255）に入りません」のような文。
-__attribute__((noreturn)) void orz_rt_panic_convert(const char *site, long value, const char *reason) {
+__attribute__((noreturn)) void orz_rt_panic_convert(const char *site, i64 value, const char *reason) {
     char a[24];
     panic_begin(site);
     err("変換する値 ");
@@ -219,22 +513,20 @@ __attribute__((noreturn)) void orz_rt_panic_convert(const char *site, long value
 //
 // arena の中で確保したものは GC を通らない。arena を抜けるときにまとめて返す。
 
-#define SYS_munmap 11
-
-static void *map(long n, const char *site) {
-    long p = sys6(SYS_mmap, 0, n, 3 /* 読み書き */, 0x22 /* MAP_PRIVATE | MAP_ANONYMOUS */, -1, 0);
-    if (p < 0 && p > -4096) orz_rt_panic(site, "メモリが足りません");
-    return (void *)p;
+static void *map(i64 n, const char *site) {
+    void *p = os_map(n);
+    if (!p) orz_rt_panic(site, "メモリが足りません");
+    return p;
 }
 
-static void unmap(void *p, long n) { sys3(SYS_munmap, (long)p, n, 0); }
+static void unmap(void *p, i64 n) { os_unmap(p, n); }
 
-#define GC_CHUNK (1L << 20)
-#define GC_HEADER (32L << 10) // 塊の先頭：3 つのビットマップ（確保済み・印・中を調べない）
-#define GC_LARGE (32L << 10)  // これより大きいものは 1 つずつ mmap する
-#define GC_MIN_THRESHOLD (8L << 20)
+#define GC_CHUNK (1LL << 20)
+#define GC_HEADER (32LL << 10) // 塊の先頭：3 つのビットマップ（確保済み・印・中を調べない）
+#define GC_LARGE (32LL << 10)  // これより大きいものは 1 つずつ mmap する
+#define GC_MIN_THRESHOLD (8LL << 20)
 
-static const long class_size[] = {
+static const i64 class_size[] = {
     16,   32,   48,   64,   80,   96,   112,  128,   160,   192,   224,   256,   320,   384,
     448,  512,  640,  768,  896,  1024, 1280, 1536,  1792,  2048,  2560,  3072,  3584,  4096,
     5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384, 20480, 24576, 28672, 32768,
@@ -243,29 +535,29 @@ static const long class_size[] = {
 
 struct chunk {
     char *start, *end; // 中身の範囲
-    long objsize;      // 1 つの大きさ（大きいものは全体）
-    long nobj;
+    i64 objsize;      // 1 つの大きさ（大きいものは全体）
+    i64 nobj;
     int cls;           // 大きさの区分（1 つずつ mmap したものは -1）
     unsigned char *alloc, *mark, *noscan;
     unsigned char large_bits[3];
     char *map_start;
-    long map_len;
+    i64 map_len;
 };
 
 static struct chunk **chunks; // start の順に並べる
-static long nchunks, chunks_cap;
+static i64 nchunks, chunks_cap;
 static char *heap_lo = (char *)-1, *heap_hi;
 static void *freelist[NCLASS];
-static long gc_since, gc_threshold = GC_MIN_THRESHOLD;
+static i64 gc_since, gc_threshold = GC_MIN_THRESHOLD;
 static char *stack_top;
 
 // コンパイラが出す：GC を動かさないか（--no-gc）、グローバル変数の範囲。
-extern const long orz_gc_disabled;
+extern const i64 orz_gc_disabled;
 extern char orz_globals_start[], orz_globals_end[];
 
-static int bit(const unsigned char *b, long i) { return (b[i >> 3] >> (i & 7)) & 1; }
-static void bit_set(unsigned char *b, long i) { b[i >> 3] |= (unsigned char)(1 << (i & 7)); }
-static void bit_clear(unsigned char *b, long i) { b[i >> 3] &= (unsigned char)~(1 << (i & 7)); }
+static int bit(const unsigned char *b, i64 i) { return (b[i >> 3] >> (i & 7)) & 1; }
+static void bit_set(unsigned char *b, i64 i) { b[i >> 3] |= (unsigned char)(1 << (i & 7)); }
+static void bit_clear(unsigned char *b, i64 i) { b[i >> 3] &= (unsigned char)~(1 << (i & 7)); }
 
 // 塊の情報を置く場所（GC の対象外）。
 static struct chunk *meta_free;
@@ -277,25 +569,25 @@ static struct chunk *new_meta(void) {
         return c;
     }
     static char *cur, *end;
-    if (end - cur < (long)sizeof(struct chunk)) {
-        cur = map(1L << 16, 0);
-        end = cur + (1L << 16);
+    if (end - cur < (i64)sizeof(struct chunk)) {
+        cur = map(1LL << 16, 0);
+        end = cur + (1LL << 16);
     }
     struct chunk *c = (struct chunk *)cur;
-    cur += (sizeof(struct chunk) + 15) & ~15UL;
+    cur += (sizeof(struct chunk) + 15) & ~15ULL;
     return c;
 }
 
 static void add_chunk(struct chunk *c) {
     if (nchunks == chunks_cap) {
-        long cap = chunks_cap ? chunks_cap * 2 : 256;
-        struct chunk **n = map(cap * (long)sizeof *n, 0);
+        i64 cap = chunks_cap ? chunks_cap * 2 : 256;
+        struct chunk **n = map(cap * (i64)sizeof *n, 0);
         memcpy(n, chunks, nchunks * sizeof *n);
-        if (chunks) unmap(chunks, chunks_cap * (long)sizeof *n);
+        if (chunks) unmap(chunks, chunks_cap * (i64)sizeof *n);
         chunks = n;
         chunks_cap = cap;
     }
-    long i = nchunks;
+    i64 i = nchunks;
     while (i > 0 && chunks[i - 1]->start > c->start) {
         chunks[i] = chunks[i - 1];
         i--;
@@ -308,9 +600,9 @@ static void add_chunk(struct chunk *c) {
 
 static struct chunk *find_chunk(const char *p) {
     if (p < heap_lo || p >= heap_hi) return 0;
-    long lo = 0, hi = nchunks - 1;
+    i64 lo = 0, hi = nchunks - 1;
     while (lo <= hi) {
-        long mid = (lo + hi) / 2;
+        i64 mid = (lo + hi) / 2;
         struct chunk *c = chunks[mid];
         if (p < c->start)
             hi = mid - 1;
@@ -329,22 +621,22 @@ static void new_chunk(int cls, const char *site) {
     c->nobj = (GC_CHUNK - GC_HEADER) / c->objsize;
     c->cls = cls;
     c->alloc = (unsigned char *)m;
-    c->mark = c->alloc + (8L << 10);
-    c->noscan = c->mark + (8L << 10);
+    c->mark = c->alloc + (8LL << 10);
+    c->noscan = c->mark + (8LL << 10);
     c->start = m + GC_HEADER;
     c->end = c->start + c->nobj * c->objsize;
     c->map_start = m;
     c->map_len = GC_CHUNK;
     add_chunk(c);
     // 空いているものをつなぐ（後ろから入れるので、前から使われる）。
-    for (long i = c->nobj - 1; i >= 0; i--) {
+    for (i64 i = c->nobj - 1; i >= 0; i--) {
         void **o = (void **)(c->start + i * c->objsize);
         *o = freelist[cls];
         freelist[cls] = o;
     }
 }
 
-static int size_class(long n) {
+static int size_class(i64 n) {
     int lo = 0, hi = NCLASS - 1;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
@@ -359,20 +651,20 @@ static int size_class(long n) {
 // ---- 印を付ける ----
 
 static void **mstack;
-static long msp, mcap;
+static i64 msp, mcap;
 
 static void mark_ptr(const char *p) {
     struct chunk *c = find_chunk(p);
     if (!c) return;
-    long i = (p - c->start) / c->objsize;
+    i64 i = (p - c->start) / c->objsize;
     if (i >= c->nobj || !bit(c->alloc, i) || bit(c->mark, i)) return;
     bit_set(c->mark, i);
     if (bit(c->noscan, i)) return;
     if (msp == mcap) {
-        long cap = mcap ? mcap * 2 : 4096;
-        void **n = map(cap * (long)sizeof *n, 0);
+        i64 cap = mcap ? mcap * 2 : 4096;
+        void **n = map(cap * (i64)sizeof *n, 0);
         memcpy(n, mstack, msp * sizeof *n);
-        if (mstack) unmap(mstack, mcap * (long)sizeof *n);
+        if (mstack) unmap(mstack, mcap * (i64)sizeof *n);
         mstack = n;
         mcap = cap;
     }
@@ -380,7 +672,7 @@ static void mark_ptr(const char *p) {
 }
 
 static void scan_range(const char *lo, const char *hi) {
-    lo = (const char *)(((unsigned long)lo + 7) & ~7UL);
+    lo = (const char *)(((u64)lo + 7) & ~7ULL);
     for (const char *p = lo; p + 8 <= hi; p += 8) mark_ptr(*(char *const *)p);
 }
 
@@ -389,7 +681,7 @@ static void scan_arenas(void);
 void orz_rt_collect(void) {
     if (orz_gc_disabled) return;
     // 呼び出し元がレジスタに持っているかもしれないポインタを、スタックに書き出してから調べる。
-    long regs[6];
+    i64 regs[6];
     __asm__ volatile("movq %%rbx, 0(%0)\n\t"
                      "movq %%rbp, 8(%0)\n\t"
                      "movq %%r12, 16(%0)\n\t"
@@ -413,11 +705,11 @@ void orz_rt_collect(void) {
 
     // 掃除：印のないものを解放し、空いているものをつなぎ直す。
     for (int k = 0; k < NCLASS; k++) freelist[k] = 0;
-    long live = 0, kept = 0;
-    for (long j = 0; j < nchunks; j++) {
+    i64 live = 0, kept = 0;
+    for (i64 j = 0; j < nchunks; j++) {
         struct chunk *c = chunks[j];
-        long used = 0;
-        for (long i = 0; i < c->nobj; i++) {
+        i64 used = 0;
+        for (i64 i = 0; i < c->nobj; i++) {
             if (bit(c->alloc, i) && !bit(c->mark, i)) bit_clear(c->alloc, i);
             if (bit(c->alloc, i)) used++;
         }
@@ -431,7 +723,7 @@ void orz_rt_collect(void) {
         memset(c->mark, 0, (c->nobj + 7) / 8);
         live += used * c->objsize;
         if (c->cls >= 0) {
-            for (long i = c->nobj - 1; i >= 0; i--) {
+            for (i64 i = c->nobj - 1; i >= 0; i--) {
                 if (!bit(c->alloc, i)) {
                     void **o = (void **)(c->start + i * c->objsize);
                     *o = freelist[c->cls];
@@ -444,7 +736,7 @@ void orz_rt_collect(void) {
     nchunks = kept;
     heap_lo = (char *)-1;
     heap_hi = 0;
-    for (long j = 0; j < nchunks; j++) {
+    for (i64 j = 0; j < nchunks; j++) {
         if (chunks[j]->start < heap_lo) heap_lo = chunks[j]->start;
         if (chunks[j]->end > heap_hi) heap_hi = chunks[j]->end;
     }
@@ -455,12 +747,12 @@ void orz_rt_collect(void) {
 // ---- 確保 ----
 
 // GC のヒープから確保する。中身は 0。noscan なら、中にポインタがない（GC が中を調べない）。
-static void *gc_alloc(long n, int noscan, const char *site) {
-    if (n > (1L << 46)) orz_rt_panic(site, "メモリが足りません");
+static void *gc_alloc(i64 n, int noscan, const char *site) {
+    if (n > (1LL << 46)) orz_rt_panic(site, "メモリが足りません");
     n += 1; // ちょうど終わりを指すポインタも、このものを指しているとみなせるように
     if (gc_since >= gc_threshold) orz_rt_collect();
     if (n > GC_LARGE) {
-        long len = (n + 4095) & ~4095L;
+        i64 len = (n + 4095) & ~4095LL;
         if (gc_since + len >= gc_threshold) orz_rt_collect();
         char *m = map(len, site);
         struct chunk *c = new_meta();
@@ -485,7 +777,7 @@ static void *gc_alloc(long n, int noscan, const char *site) {
     void **o = freelist[cls];
     freelist[cls] = *o;
     struct chunk *c = find_chunk((char *)o);
-    long i = ((char *)o - c->start) / c->objsize;
+    i64 i = ((char *)o - c->start) / c->objsize;
     bit_set(c->alloc, i);
     if (noscan)
         bit_set(c->noscan, i);
@@ -501,18 +793,18 @@ static void *gc_alloc(long n, int noscan, const char *site) {
 struct arena_block {
     struct arena_block *next;
     char *cur, *end;
-    long len;
+    i64 len;
 };
 
 static struct arena_block **arenas; // 開いている arena ごとの、ブロックのつながり
-static long narenas, arenas_cap;
+static i64 narenas, arenas_cap;
 
 void orz_rt_arena_push(void) {
     if (narenas == arenas_cap) {
-        long cap = arenas_cap ? arenas_cap * 2 : 64;
-        struct arena_block **n = map(cap * (long)sizeof *n, 0);
+        i64 cap = arenas_cap ? arenas_cap * 2 : 64;
+        struct arena_block **n = map(cap * (i64)sizeof *n, 0);
         memcpy(n, arenas, narenas * sizeof *n);
-        if (arenas) unmap(arenas, arenas_cap * (long)sizeof *n);
+        if (arenas) unmap(arenas, arenas_cap * (i64)sizeof *n);
         arenas = n;
         arenas_cap = cap;
     }
@@ -528,15 +820,15 @@ void orz_rt_arena_pop(void) {
     }
 }
 
-static void *arena_alloc(long n, const char *site) {
-    if (n > (1L << 46)) orz_rt_panic(site, "メモリが足りません");
-    n = (n + 1 + 15) & ~15L;
+static void *arena_alloc(i64 n, const char *site) {
+    if (n > (1LL << 46)) orz_rt_panic(site, "メモリが足りません");
+    n = (n + 1 + 15) & ~15LL;
     struct arena_block *b = arenas[narenas - 1];
     if (!b || b->end - b->cur < n) {
-        long len = n + (long)sizeof *b > (1L << 16) ? (n + (long)sizeof *b + 4095) & ~4095L : (1L << 16);
+        i64 len = n + (i64)sizeof *b > (1LL << 16) ? (n + (i64)sizeof *b + 4095) & ~4095LL : (1LL << 16);
         struct arena_block *nb = map(len, site);
         nb->len = len;
-        nb->cur = (char *)nb + ((sizeof *nb + 15) & ~15UL);
+        nb->cur = (char *)nb + ((sizeof *nb + 15) & ~15ULL);
         nb->end = (char *)nb + len;
         nb->next = b;
         arenas[narenas - 1] = nb;
@@ -549,19 +841,19 @@ static void *arena_alloc(long n, const char *site) {
 
 // arena の中身も GC の根にする（arena のものが GC のものを指していることがある）。
 static void scan_arenas(void) {
-    for (long k = 0; k < narenas; k++)
+    for (i64 k = 0; k < narenas; k++)
         for (struct arena_block *b = arenas[k]; b; b = b->next)
-            scan_range((char *)b + ((sizeof *b + 15) & ~15UL), b->cur);
+            scan_range((char *)b + ((sizeof *b + 15) & ~15ULL), b->cur);
 }
 
 // 確保する。arena の中なら arena から、そうでなければ GC のヒープから。中身は 0。
-static void *alloc_obj(long n, int noscan, const char *site) {
+static void *alloc_obj(i64 n, int noscan, const char *site) {
     if (narenas > 0) return arena_alloc(n, site);
     return gc_alloc(n, noscan, site);
 }
 
 // allocate と構造体。中にポインタがあるかもしれないので、GC は中を調べる。
-void *orz_rt_alloc(long n, const char *site) {
+void *orz_rt_alloc(i64 n, const char *site) {
     if (n < 0) {
         char a[24];
         panic_begin(site);
@@ -573,20 +865,20 @@ void *orz_rt_alloc(long n, const char *site) {
     return alloc_obj(n, 0, site);
 }
 
-static char *new_str(long len) {
-    long *h = alloc_obj(8 + len + 1, 1, 0);
+static char *new_str(i64 len) {
+    i64 *h = alloc_obj(8 + len + 1, 1, 0);
     h[0] = len;
     return (char *)(h + 1);
 }
 
-static char *str_from(const char *p, long len) {
+static char *str_from(const char *p, i64 len) {
     char *s = new_str(len);
     memcpy(s, p, len);
     return s;
 }
 
 // 配列を作る。kind：0 = 中身は 0、1 = 空の文字列、2 = 空の配列。scan：要素にポインタがあるか。
-void *orz_rt_array_new(long count, long elem_size, long kind, long scan, const char *site) {
+void *orz_rt_array_new(i64 count, i64 elem_size, i64 kind, i64 scan, const char *site) {
     if (count < 0) {
         char a[24];
         panic_begin(site);
@@ -595,21 +887,21 @@ void *orz_rt_array_new(long count, long elem_size, long kind, long scan, const c
         err(" が負です");
         panic_end();
     }
-    if (count > (1L << 40) / elem_size) orz_rt_panic(site, "メモリが足りません");
-    long *h = alloc_obj(8 + count * elem_size, !scan, site);
+    if (count > (1LL << 40) / elem_size) orz_rt_panic(site, "メモリが足りません");
+    i64 *h = alloc_obj(8 + count * elem_size, !scan, site);
     h[0] = count;
     void **data = (void **)(h + 1);
     if (kind == 1)
-        for (long i = 0; i < count; i++) data[i] = str_empty.s;
+        for (i64 i = 0; i < count; i++) data[i] = str_empty.s;
     else if (kind == 2)
-        for (long i = 0; i < count; i++) data[i] = empty_array.data;
+        for (i64 i = 0; i < count; i++) data[i] = empty_array.data;
     return data;
 }
 
 // ---------------- 文字列 ----------------
 
 char *orz_rt_str_concat(const char *a, const char *b) {
-    long la = str_len(a), lb = str_len(b);
+    i64 la = str_len(a), lb = str_len(b);
     char *s = new_str(la + lb);
     memcpy(s, a, la);
     memcpy(s + la, b, lb);
@@ -617,20 +909,20 @@ char *orz_rt_str_concat(const char *a, const char *b) {
 }
 
 // 中身が同じか。どちらかが null（0）のときは、両方 null なら同じ。
-long orz_rt_str_eq(const char *a, const char *b) {
+i64 orz_rt_str_eq(const char *a, const char *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
-    long la = str_len(a);
+    i64 la = str_len(a);
     return la == str_len(b) && memcmp(a, b, la) == 0;
 }
 
-char *orz_rt_str_from_int(long v) {
+char *orz_rt_str_from_int(i64 v) {
     char buf[24];
     char *p = fmt_long(buf, v);
     return str_from(p, cstrlen(p));
 }
 
-char *orz_rt_str_from_bool(long v) { return v ? str_true.s : str_false.s; }
+char *orz_rt_str_from_bool(i64 v) { return v ? str_true.s : str_false.s; }
 
 // ---------------- 大きな整数（decnum の表示と読み取りに使う） ----------------
 
@@ -641,7 +933,7 @@ typedef struct {
     unsigned d[BIG_WORDS];
 } big;
 
-static void big_set(big *a, unsigned long v) {
+static void big_set(big *a, u64 v) {
     a->n = 0;
     while (v) {
         a->d[a->n++] = (unsigned)v;
@@ -661,9 +953,9 @@ static int big_cmp(const big *a, const big *b) {
 }
 
 static void big_mul_small(big *a, unsigned m) {
-    unsigned long carry = 0;
+    u64 carry = 0;
     for (int i = 0; i < a->n; i++) {
-        unsigned long t = (unsigned long)a->d[i] * m + carry;
+        u64 t = (u64)a->d[i] * m + carry;
         a->d[i] = (unsigned)t;
         carry = t >> 32;
     }
@@ -671,9 +963,9 @@ static void big_mul_small(big *a, unsigned m) {
 }
 
 static void big_add_small(big *a, unsigned v) {
-    unsigned long carry = v;
+    u64 carry = v;
     for (int i = 0; i < a->n && carry; i++) {
-        unsigned long t = (unsigned long)a->d[i] + carry;
+        u64 t = (u64)a->d[i] + carry;
         a->d[i] = (unsigned)t;
         carry = t >> 32;
     }
@@ -683,9 +975,9 @@ static void big_add_small(big *a, unsigned v) {
 // r = a + b（r は a と同じでもよい）
 static void big_add(big *r, const big *a, const big *b) {
     int n = a->n > b->n ? a->n : b->n;
-    unsigned long carry = 0;
+    u64 carry = 0;
     for (int i = 0; i < n; i++) {
-        unsigned long t = carry + (i < a->n ? a->d[i] : 0) + (i < b->n ? b->d[i] : 0);
+        u64 t = carry + (i < a->n ? a->d[i] : 0) + (i < b->n ? b->d[i] : 0);
         r->d[i] = (unsigned)t;
         carry = t >> 32;
     }
@@ -695,11 +987,11 @@ static void big_add(big *r, const big *a, const big *b) {
 
 // a -= b（a >= b）
 static void big_sub(big *a, const big *b) {
-    long borrow = 0;
+    i64 borrow = 0;
     for (int i = 0; i < a->n; i++) {
-        long t = (long)a->d[i] - (i < b->n ? (long)b->d[i] : 0) - borrow;
+        i64 t = (i64)a->d[i] - (i < b->n ? (i64)b->d[i] : 0) - borrow;
         borrow = t < 0;
-        if (t < 0) t += 1L << 32;
+        if (t < 0) t += 1LL << 32;
         a->d[i] = (unsigned)t;
     }
     big_norm(a);
@@ -736,8 +1028,8 @@ static int big_bitlen(const big *a) {
 }
 
 // n を d で割った商（2^60 未満であること）。n は余りになる。
-static unsigned long big_div(big *n, const big *d, int *rem_nonzero) {
-    unsigned long q = 0;
+static u64 big_div(big *n, const big *d, int *rem_nonzero) {
+    u64 q = 0;
     int shift = big_bitlen(n) - big_bitlen(d);
     big t;
     for (int i = shift; i >= 0; i--) {
@@ -745,7 +1037,7 @@ static unsigned long big_div(big *n, const big *d, int *rem_nonzero) {
         big_shl(&t, i);
         if (big_cmp(n, &t) >= 0) {
             big_sub(n, &t);
-            q |= 1UL << i;
+            q |= 1ULL << i;
         }
     }
     *rem_nonzero = n->n != 0;
@@ -754,29 +1046,29 @@ static unsigned long big_div(big *n, const big *d, int *rem_nonzero) {
 
 // ---------------- decnum ----------------
 
-static double from_bits(long v) {
+static double from_bits(i64 v) {
     union {
-        long l;
+        i64 l;
         double d;
     } u = {v};
     return u.d;
 }
 
-static long to_bits(double d) {
+static i64 to_bits(double d) {
     union {
         double d;
-        long l;
+        i64 l;
     } u = {d};
     return u.l;
 }
 
 // 元の値に戻せるいちばん短い 10 進の桁を作る（Burger & Dybvig の方法）。
 // 値 = f × 2^e（f > 0）。値 = 0.d1d2… × 10^k となる k を返し、桁は buf に入る。
-static int dec_digits(unsigned long f, int e, char *buf, int *k_out) {
+static int dec_digits(u64 f, int e, char *buf, int *k_out) {
     big r, s, mp, mm, t;
     int even = (f % 2 == 0); // 偶数なら、ちょうど境目も元の値に戻る
     if (e >= 0) {
-        if (f != (1UL << 52)) {
+        if (f != (1ULL << 52)) {
             big_set(&r, f);
             big_shl(&r, e + 1);
             big_set(&s, 2);
@@ -794,7 +1086,7 @@ static int dec_digits(unsigned long f, int e, char *buf, int *k_out) {
             big_shl(&mm, e);
         }
     } else {
-        if (e == -1074 || f != (1UL << 52)) {
+        if (e == -1074 || f != (1ULL << 52)) {
             big_set(&r, f);
             big_shl(&r, 1);
             big_set(&s, 1);
@@ -867,21 +1159,21 @@ static int dec_digits(unsigned long f, int e, char *buf, int *k_out) {
 // decnum を文字列にする。out は 48 バイト以上。
 // 1e-4 以上 1e16 未満は 123.45 の形、それ以外は 1.5e20 の形。整数でも .0 を付ける。
 static void fmt_dec(char *out, double x) {
-    unsigned long bits = (unsigned long)to_bits(x);
+    u64 bits = (u64)to_bits(x);
     char *p = out;
     if (bits >> 63) *p++ = '-';
-    bits &= ~(1UL << 63);
+    bits &= ~(1ULL << 63);
     if (bits == 0) {
         memcpy(p, "0.0", 4);
         return;
     }
     int be = (int)(bits >> 52);
-    unsigned long f = bits & ((1UL << 52) - 1);
+    u64 f = bits & ((1ULL << 52) - 1);
     int e;
     if (be == 0) {
         e = -1074;
     } else {
-        f |= 1UL << 52;
+        f |= 1ULL << 52;
         e = be - 1075;
     }
     char dg[24];
@@ -919,14 +1211,14 @@ static void fmt_dec(char *out, double x) {
 }
 
 // 10 進の文字列を decnum にする（正しく丸める）。形が違うか、大きすぎるなら 0 を返す。
-static int parse_dec(const char *s, long len, double *out) {
-    long i = 0;
+static int parse_dec(const char *s, i64 len, double *out) {
+    i64 i = 0;
     int neg = 0;
     if (i < len && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
     big num, den;
     big_set(&num, 0);
     int ndig = 0, any = 0, sticky = 0;
-    long exp10 = 0; // 値 = num × 10^exp10
+    i64 exp10 = 0; // 値 = num × 10^exp10
     while (i < len && s[i] >= '0' && s[i] <= '9') {
         any = 1;
         if (ndig < 800) {
@@ -964,7 +1256,7 @@ static int parse_dec(const char *s, long len, double *out) {
         int eneg = 0;
         if (i < len && (s[i] == '+' || s[i] == '-')) eneg = s[i++] == '-';
         if (i >= len || s[i] < '0' || s[i] > '9') return 0;
-        long ev = 0;
+        i64 ev = 0;
         while (i < len && s[i] >= '0' && s[i] <= '9') {
             if (ev < 100000) ev = ev * 10 + (s[i] - '0');
             i++;
@@ -983,18 +1275,18 @@ static int parse_dec(const char *s, long len, double *out) {
         exp10--;
         ndig++;
     }
-    long mag = ndig + exp10; // 値 < 10^mag
+    i64 mag = ndig + exp10; // 値 < 10^mag
     if (mag > 310) return 0;
     if (mag < -330) {
         *out = neg ? -0.0 : 0.0;
         return 1;
     }
     big_set(&den, 1);
-    for (long k = 0; k < exp10; k++) big_mul_small(&num, 10);
-    for (long k = 0; k < -exp10; k++) big_mul_small(&den, 10);
+    for (i64 k = 0; k < exp10; k++) big_mul_small(&num, 10);
+    for (i64 k = 0; k < -exp10; k++) big_mul_small(&den, 10);
     // q = floor(num × 2^sh / den) が 2^53 以上 2^54 未満になる sh を探す。
     int sh = 54 - (big_bitlen(&num) - big_bitlen(&den));
-    unsigned long q;
+    u64 q;
     int rem;
     for (;;) {
         big n = num, d = den;
@@ -1003,50 +1295,50 @@ static int parse_dec(const char *s, long len, double *out) {
         else
             big_shl(&d, -sh);
         q = big_div(&n, &d, &rem);
-        if (q >= (1UL << 54)) {
+        if (q >= (1ULL << 54)) {
             sh--;
             continue;
         }
-        if (q < (1UL << 53)) {
+        if (q < (1ULL << 53)) {
             sh++;
             continue;
         }
         break;
     }
-    long e2 = 1 - sh; // 値 ≒ (q / 2) × 2^e2
-    unsigned long bits;
+    i64 e2 = 1 - sh; // 値 ≒ (q / 2) × 2^e2
+    u64 bits;
     if (e2 < -1074) {
         // 非正規化数：2^-1074 の単位で丸め直す。
         big n = num, d = den;
         big_shl(&n, 1075);
         q = big_div(&n, &d, &rem);
-        unsigned long m = q >> 1;
+        u64 m = q >> 1;
         if ((q & 1) && (rem || (m & 1))) m++;
         bits = m;
     } else {
-        unsigned long m = q >> 1;
+        u64 m = q >> 1;
         if ((q & 1) && (rem || (m & 1))) m++;
-        if (m == (1UL << 53)) {
+        if (m == (1ULL << 53)) {
             m >>= 1;
             e2++;
         }
         if (e2 > 971) return 0;
-        bits = ((unsigned long)(e2 + 1075) << 52) | (m - (1UL << 52));
+        bits = ((u64)(e2 + 1075) << 52) | (m - (1ULL << 52));
     }
-    if (neg) bits |= 1UL << 63;
-    *out = from_bits((long)bits);
+    if (neg) bits |= 1ULL << 63;
+    *out = from_bits((i64)bits);
     return 1;
 }
 
-char *orz_rt_str_from_dec(long v) {
+char *orz_rt_str_from_dec(i64 v) {
     char buf[48];
     fmt_dec(buf, from_bits(v));
     return str_from(buf, cstrlen(buf));
 }
 
 // maybe:32 などの箱。中身は変わらないので、arena の中でも GC のヒープに置く（arena を抜けても消えない）。
-void *orz_rt_box(long v) {
-    long *p = gc_alloc(8, 0, 0);
+void *orz_rt_box(i64 v) {
+    i64 *p = gc_alloc(8, 0, 0);
     *p = v;
     return p;
 }
@@ -1059,26 +1351,26 @@ void *orz_rt_str_to_dec(const char *s) {
 }
 
 // 文字列 → 整数（bits は 8・32・64）。読めないか範囲外なら null。
-void *orz_rt_str_to_int(const char *s, long bits) {
-    long len = str_len(s), i = 0;
+void *orz_rt_str_to_int(const char *s, i64 bits) {
+    i64 len = str_len(s), i = 0;
     int neg = 0;
     if (i < len && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
     if (i >= len) return 0;
-    unsigned long v = 0, limit = neg ? (1UL << 63) : (1UL << 63) - 1;
+    u64 v = 0, limit = neg ? (1ULL << 63) : (1ULL << 63) - 1;
     for (; i < len; i++) {
         if (s[i] < '0' || s[i] > '9') return 0;
         unsigned d = (unsigned)(s[i] - '0');
         if (v > (limit - d) / 10) return 0;
         v = v * 10 + d;
     }
-    long x = neg ? (long)(0 - v) : (long)v;
+    i64 x = neg ? (i64)(0 - v) : (i64)v;
     if (bits == 8 && (x < 0 || x > 255)) return 0;
-    if (bits == 32 && (x < -2147483647L - 1 || x > 2147483647L)) return 0;
+    if (bits == 32 && (x < -2147483647LL - 1 || x > 2147483647LL)) return 0;
     return orz_rt_box(x);
 }
 
 // x87 の fprem で、誤差なしの余りを出す（C の fmod と同じ。符号は割られる数と同じ）。
-long orz_rt_fmod(long a, long b) {
+i64 orz_rt_fmod(i64 a, i64 b) {
     long double r;
     __asm__("1: fprem\n\t"
             "fnstsw %%ax\n\t"
@@ -1107,18 +1399,18 @@ static long double x87_exp2(long double z) {
 
 static int is_integer(double y) {
     double a = y < 0 ? -y : y;
-    return a >= 4503599627370496.0 || (double)(long)y == y;
+    return a >= 4503599627370496.0 || (double)(i64)y == y;
 }
 
 static int is_odd_integer(double y) {
     double a = y < 0 ? -y : y;
-    return a < 9007199254740992.0 && (double)(long)y == y && ((long)y & 1);
+    return a < 9007199254740992.0 && (double)(i64)y == y && ((i64)y & 1);
 }
 
 static const char dec_overflow[] = "計算の結果が decnum の範囲を超えました";
 
 // decnum の累乗。
-long orz_rt_fpow(long a, long b, const char *site) {
+i64 orz_rt_fpow(i64 a, i64 b, const char *site) {
     double x = from_bits(a), y = from_bits(b), r;
     if (y == 0) {
         r = 1.0;
@@ -1137,7 +1429,7 @@ long orz_rt_fpow(long a, long b, const char *site) {
         double ay = y < 0 ? -y : y;
         if (is_integer(y) && ay <= 1024) {
             // 小さな整数の指数は、かけ算を繰り返す（80bit で計算するので誤差が小さい）。
-            unsigned long n = (unsigned long)ay;
+            u64 n = (u64)ay;
             long double base = ax, acc = 1.0L;
             while (n) {
                 if (n & 1) acc *= base;
@@ -1150,12 +1442,12 @@ long orz_rt_fpow(long a, long b, const char *site) {
         }
         r = (double)(neg ? -res : res);
     }
-    unsigned long bits = (unsigned long)to_bits(r);
+    u64 bits = (u64)to_bits(r);
     if (((bits >> 52) & 0x7ff) == 0x7ff) orz_rt_panic(site, dec_overflow);
     return to_bits(r);
 }
 
-__attribute__((noreturn)) void orz_rt_panic_convert_dec(const char *site, long value, const char *reason) {
+__attribute__((noreturn)) void orz_rt_panic_convert_dec(const char *site, i64 value, const char *reason) {
     char a[48];
     fmt_dec(a, from_bits(value));
     panic_begin(site);
@@ -1168,14 +1460,14 @@ __attribute__((noreturn)) void orz_rt_panic_convert_dec(const char *site, long v
 
 // ---------------- 表示 ----------------
 
-static void put_int(long v) {
+static void put_int(i64 v) {
     char buf[24];
     outs(fmt_long(buf, v));
 }
 
-static void put_addr(long v) {
+static void put_addr(i64 v) {
     char buf[24];
-    outs(fmt_hex(buf, (unsigned long)v));
+    outs(fmt_hex(buf, (u64)v));
 }
 
 static void put_str(const char *s) {
@@ -1190,7 +1482,7 @@ void orz_rt_newline(void) { out("\n", 1); }
 // 構造体を表示するための説明。コンパイラが出す。
 extern const char *const orz_struct_descs[];
 
-static long elem_size(const char *desc) {
+static i64 elem_size(const char *desc) {
     switch (desc[0]) {
     case 'b':
     case 'B':
@@ -1219,16 +1511,16 @@ static void put_value(const char *desc, const void *p, int quote) {
         put_int(*(const int *)p);
         break;
     case 'l':
-        put_int(*(const long *)p);
+        put_int(*(const i64 *)p);
         break;
     case 'd': {
         char buf[48];
-        fmt_dec(buf, from_bits(*(const long *)p));
+        fmt_dec(buf, from_bits(*(const i64 *)p));
         outs(buf);
         break;
     }
     case 'p':
-        put_addr(*(const long *)p);
+        put_addr(*(const i64 *)p);
         break;
     case 'n':
         outs("null");
@@ -1265,9 +1557,9 @@ static void put_value(const char *desc, const void *p, int quote) {
             break;
         }
         put_depth++;
-        long n = ((const long *)a)[-1], size = elem_size(desc + 1);
+        i64 n = ((const i64 *)a)[-1], size = elem_size(desc + 1);
         out("[", 1);
-        for (long i = 0; i < n; i++) {
+        for (i64 i = 0; i < n; i++) {
             if (i) out(", ", 2);
             put_value(desc + 1, a + i * size, 1);
         }
@@ -1277,7 +1569,7 @@ static void put_value(const char *desc, const void *p, int quote) {
     }
     case 'S': {
         const char *obj = *(const char *const *)p;
-        long index = 0;
+        i64 index = 0;
         for (const char *q = desc + 1; *q != ';'; q++) index = index * 10 + (*q - '0');
         const char *sd = orz_struct_descs[index];
         outs(sd); // 構造体の名前
@@ -1292,7 +1584,7 @@ static void put_value(const char *desc, const void *p, int quote) {
         while (*f) {
             const char *fname = f;
             const char *info = fname + cstrlen(fname) + 1; // 「位置:型の説明」
-            long offset = 0;
+            i64 offset = 0;
             const char *q = info;
             while (*q != ':') offset = offset * 10 + (*q++ - '0');
             if (!first) out(", ", 2);
@@ -1310,18 +1602,18 @@ static void put_value(const char *desc, const void *p, int quote) {
 }
 
 // v を、型の説明 desc に従って表示する。
-void orz_rt_put(long v, const char *desc) { put_value(desc, &v, 0); }
+void orz_rt_put(i64 v, const char *desc) { put_value(desc, &v, 0); }
 
 // ---------------- 複製 ----------------
 
-void *orz_rt_copy(const void *p, long size) {
+void *orz_rt_copy(const void *p, i64 size) {
     void *q = alloc_obj(size, 0, 0);
     memcpy(q, p, size);
     return q;
 }
 
-void *orz_rt_array_copy(const char *a, long elem_size, long scan) {
-    long n = ((const long *)a)[-1];
+void *orz_rt_array_copy(const char *a, i64 elem_size, i64 scan) {
+    i64 n = ((const i64 *)a)[-1];
     void *b = orz_rt_array_new(n, elem_size, 0, scan, 0);
     memcpy(b, a, n * elem_size);
     return b;
@@ -1329,17 +1621,17 @@ void *orz_rt_array_copy(const char *a, long elem_size, long scan) {
 
 // ---------------- 入力とファイル ----------------
 
-static long last_errno;
+static i64 last_errno;
 
 // 伸びるバッファ。古いものは捨てる（GC が入るまでは解放しない）。
 struct buf {
     char *p;
-    long len, cap;
+    i64 len, cap;
 };
 
-static void buf_push(struct buf *b, const char *p, long n) {
+static void buf_push(struct buf *b, const char *p, i64 n) {
     if (b->len + n > b->cap) {
-        long cap = b->cap ? b->cap * 2 : 256;
+        i64 cap = b->cap ? b->cap * 2 : 256;
         while (cap < b->len + n) cap *= 2;
         char *q = alloc_obj(cap, 1, 0);
         memcpy(q, b->p, b->len);
@@ -1351,7 +1643,7 @@ static void buf_push(struct buf *b, const char *p, long n) {
 }
 
 static char inbuf[4096];
-static long inpos, inlen;
+static i64 inpos, inlen;
 static int ineof;
 
 // 1 行読む。末尾の改行（\n と \r\n）は除く。入力の終わりなら null。
@@ -1362,8 +1654,7 @@ char *orz_rt_read_line(void) {
     for (;;) {
         if (inpos == inlen) {
             if (ineof) break;
-            long r = sys3(SYS_read, 0, (long)inbuf, sizeof inbuf);
-            if (r == -EINTR) continue;
+            i64 r = os_read(0, inbuf, sizeof inbuf);
             if (r <= 0) {
                 ineof = 1;
                 break;
@@ -1387,7 +1678,7 @@ char *orz_rt_read_line(void) {
 }
 
 char *orz_rt_read_file(const char *path) {
-    long fd = sys4(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0, 0);
+    i64 fd = os_open_read(path);
     if (fd < 0) {
         last_errno = -fd;
         return 0;
@@ -1395,40 +1686,38 @@ char *orz_rt_read_file(const char *path) {
     struct buf b = {0, 0, 0};
     char tmp[4096];
     for (;;) {
-        long r = sys3(SYS_read, fd, (long)tmp, sizeof tmp);
-        if (r == -EINTR) continue;
+        i64 r = os_read(fd, tmp, sizeof tmp);
         if (r < 0) {
             last_errno = -r;
-            sys3(SYS_close, fd, 0, 0);
+            os_close(fd);
             return 0;
         }
         if (r == 0) break;
         buf_push(&b, tmp, r);
     }
-    sys3(SYS_close, fd, 0, 0);
+    os_close(fd);
     return str_from(b.p, b.len);
 }
 
-long orz_rt_write_file(const char *path, const char *text) {
-    long fd = sys4(SYS_open, (long)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644, 0);
+i64 orz_rt_write_file(const char *path, const char *text) {
+    i64 fd = os_open_write(path);
     if (fd < 0) {
         last_errno = -fd;
         return 0;
     }
     const char *p = text;
-    long n = str_len(text);
+    i64 n = str_len(text);
     while (n > 0) {
-        long r = sys3(SYS_write, fd, (long)p, n);
-        if (r == -EINTR) continue;
+        i64 r = os_write(fd, p, n);
         if (r < 0) {
             last_errno = -r;
-            sys3(SYS_close, fd, 0, 0);
+            os_close(fd);
             return 0;
         }
         p += r;
         n -= r;
     }
-    long r = sys3(SYS_close, fd, 0, 0);
+    i64 r = os_close(fd);
     if (r < 0) {
         last_errno = -r;
         return 0;
@@ -1472,7 +1761,7 @@ char *orz_rt_last_error(void) {
     default: {
         char a[24], *num = fmt_long(a, last_errno);
         char msg[64] = "エラー（番号 ";
-        long l = cstrlen(msg), k = 0;
+        i64 l = cstrlen(msg), k = 0;
         while (num[k]) msg[l++] = num[k++];
         const char *tail = "）";
         for (k = 0; tail[k]; k++) msg[l++] = tail[k];
@@ -1485,20 +1774,20 @@ char *orz_rt_last_error(void) {
 // ---------------- 累乗 ----------------
 
 // 整数の累乗。bits は 8・32・64。途中の 2 乗が溢れるなら、最後の結果も溢れる。
-long orz_rt_pow(long base, long exp, long bits, const char *site, const char *overflow, const char *negexp) {
+i64 orz_rt_pow(i64 base, i64 exp, i64 bits, const char *site, const char *overflow, const char *negexp) {
     if (exp < 0) orz_rt_panic(site, negexp);
-    long lo, hi;
+    i64 lo, hi;
     if (bits == 8) {
         lo = 0;
         hi = 255;
     } else if (bits == 32) {
-        lo = -2147483647L - 1;
-        hi = 2147483647L;
+        lo = -2147483647LL - 1;
+        hi = 2147483647LL;
     } else {
-        lo = (long)(1UL << 63);
+        lo = (i64)(1ULL << 63);
         hi = ~lo;
     }
-    long r = 1;
+    i64 r = 1;
     while (exp > 0) {
         if (exp & 1) {
             if (__builtin_mul_overflow(r, base, &r) || r < lo || r > hi) orz_rt_panic(site, overflow);
@@ -1513,24 +1802,28 @@ long orz_rt_pow(long base, long exp, long bits, const char *site, const char *ov
 
 // ---------------- 起動 ----------------
 
-static long g_argc;
+static i64 g_argc;
 static char **g_argv;
 
 // コマンドライン引数を array:string にする。
 void *orz_rt_args(void) {
     char **a = orz_rt_array_new(g_argc, 8, 0, 1, 0);
-    for (long i = 0; i < g_argc; i++) a[i] = str_from(g_argv[i], cstrlen(g_argv[i]));
+    for (i64 i = 0; i < g_argc; i++) a[i] = str_from(g_argv[i], cstrlen(g_argv[i]));
     return a;
 }
+
+static const char crash_message[] = "実行時エラー: メモリの読み書きに失敗しました"
+                                    "（再帰が深すぎてスタックが溢れたか、ポインタが不正な場所を指しています）\n";
+
+#ifndef _WIN32
 
 // スタックが溢れたとき（SIGSEGV）に、メッセージを出して止まる。
 // 溢れたスタックでは何もできないので、別のスタック（sigaltstack）で受ける。
 static void on_segv(int sig) {
     (void)sig;
     orz_rt_flush();
-    err("実行時エラー: メモリの読み書きに失敗しました"
-        "（再帰が深すぎてスタックが溢れたか、ポインタが不正な場所を指しています）\n");
-    sys_exit(PANIC_EXIT_CODE);
+    err(crash_message);
+    os_exit(PANIC_EXIT_CODE);
 }
 
 // シグナルから戻るとき用（on_segv は戻らないので、実際には使われない）。
@@ -1545,35 +1838,117 @@ static char altstack[65536] __attribute__((aligned(16)));
 struct kstack {
     void *sp;
     int flags;
-    long size;
+    i64 size;
 };
 
 struct ksigaction {
     void (*handler)(int);
-    unsigned long flags;
+    u64 flags;
     void (*restorer)(void);
-    unsigned long mask;
+    u64 mask;
 };
 
-static void setup_signals(void) {
-    static struct kstack ss = {altstack, 0, sizeof altstack};
-    static struct ksigaction sa = {on_segv, 0x04000000 /* SA_RESTORER */ | 0x08000000 /* SA_ONSTACK */,
-                                   orz_rt_sigreturn, 0};
-    sys3(SYS_sigaltstack, (long)&ss, 0, 0);
-    sys4(SYS_rt_sigaction, 11 /* SIGSEGV */, (long)&sa, 0, 8);
-    sys4(SYS_rt_sigaction, 7 /* SIGBUS */, (long)&sa, 0, 8);
-}
-
-// コンパイラが出す。main を呼んで、終了コードを返す。
-long orz_entry(void);
-
-// _start から呼ばれる。sp は起動時のスタック（argc、argv… が並んでいる）。
-__attribute__((noreturn)) void orz_rt_start(long *sp) {
+// sp は起動時のスタック（argc、argv… が並んでいる）。
+static void os_start(i64 *sp) {
     g_argc = sp[0];
     g_argv = (char **)(sp + 1);
     stack_top = (char *)sp;
-    setup_signals();
-    long code = orz_entry();
+    static struct kstack ss = {altstack, 0, sizeof altstack};
+    static struct ksigaction sa = {on_segv, 0x04000000 /* SA_RESTORER */ | 0x08000000 /* SA_ONSTACK */,
+                                   orz_rt_sigreturn, 0};
+    sys3(SYS_sigaltstack, (i64)&ss, 0, 0);
+    sys4(SYS_rt_sigaction, 11 /* SIGSEGV */, (i64)&sa, 0, 8);
+    sys4(SYS_rt_sigaction, 7 /* SIGBUS */, (i64)&sa, 0, 8);
+}
+
+#else // _WIN32
+
+// メモリの読み書きの失敗とスタックの溢れを受けて、メッセージを出して止まる。
+static i64 WINAPI on_exception(void *info) {
+    u32 code = **(u32 **)info;
+    // EXCEPTION_ACCESS_VIOLATION、EXCEPTION_IN_PAGE_ERROR、EXCEPTION_STACK_OVERFLOW
+    if (code != 0xc0000005u && code != 0xc0000006u && code != 0xc00000fdu) return 0;
+    orz_rt_flush();
+    err(crash_message);
+    os_exit(PANIC_EXIT_CODE);
+}
+
+// コマンドライン（UTF-16）を、Windows の決まり（MSVC の C ランタイムと同じ）で引数に分け、UTF-8 にする。
+static void parse_command_line(void) {
+    const u16 *cmd = GetCommandLineW();
+    i64 len = 0;
+    while (cmd[len]) len++;
+    u16 *w = map((len + 1) * 2, 0);
+    char *out = map(len * 3 + len + 16, 0), *o = out;
+    char **argv = map((len + 2) * 8, 0);
+    i64 argc = 0, i = 0;
+    for (;;) {
+        i64 n = 0;
+        if (argc == 0) {
+            // プログラムの名前：「"」で囲まれていればその中、なければ空白まで。「\」は特別ではない。
+            if (cmd[i] == '"') {
+                for (i++; cmd[i] && cmd[i] != '"'; i++) w[n++] = cmd[i];
+                if (cmd[i]) i++;
+            } else {
+                for (; cmd[i] && cmd[i] != ' ' && cmd[i] != '\t'; i++) w[n++] = cmd[i];
+            }
+        } else {
+            while (cmd[i] == ' ' || cmd[i] == '\t') i++;
+            if (!cmd[i]) break;
+            int quoted = 0;
+            while (cmd[i] && (quoted || (cmd[i] != ' ' && cmd[i] != '\t'))) {
+                if (cmd[i] == '\\') {
+                    i64 k = 0;
+                    while (cmd[i] == '\\') i++, k++;
+                    if (cmd[i] == '"') {
+                        // 「"」の前の「\」は 2 つで 1 つ。奇数なら「"」はそのままの文字。
+                        for (i64 j = 0; j < k / 2; j++) w[n++] = '\\';
+                        if (k % 2) w[n++] = cmd[i++];
+                    } else {
+                        for (i64 j = 0; j < k; j++) w[n++] = '\\';
+                    }
+                } else if (cmd[i] == '"') {
+                    if (quoted && cmd[i + 1] == '"') {
+                        w[n++] = '"';
+                        i += 2;
+                    } else {
+                        quoted = !quoted;
+                        i++;
+                    }
+                } else {
+                    w[n++] = cmd[i++];
+                }
+            }
+        }
+        argv[argc++] = o;
+        if (n > 0) o += WideCharToMultiByte(CP_UTF8, 0, w, (int)n, o, (int)(out + len * 3 + len + 16 - o), 0, 0);
+        *o++ = 0;
+        if (argc == 1 && !cmd[i]) break;
+    }
+    g_argc = argc;
+    g_argv = argv;
+}
+
+static void os_start(i64 *sp) {
+    (void)sp;
+    // スタックの底（GC が調べる範囲の終わり）は、TEB（%gs）の StackBase にある。
+    __asm__ volatile("movq %%gs:8, %0" : "=r"(stack_top));
+    // スタックが溢れたときに、メッセージを出すだけの余裕を残しておく。
+    u32 guarantee = 65536;
+    SetThreadStackGuarantee(&guarantee);
+    AddVectoredExceptionHandler(1, on_exception);
+    parse_command_line();
+}
+
+#endif // _WIN32
+
+// コンパイラが出す。main を呼んで、終了コードを返す。
+i64 orz_entry(void);
+
+// _start から呼ばれる。sp は起動時のスタック。
+__attribute__((noreturn)) void orz_rt_start(i64 *sp) {
+    os_start(sp);
+    i64 code = orz_entry();
     // arena の出入りは対になっているはず（コンパイラの誤りを見つけるため）。
     if (narenas != 0) orz_rt_panic(0, "（コンパイラの誤り）arena の出入りが合っていません");
     orz_rt_exit(code);

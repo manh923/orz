@@ -1,4 +1,4 @@
-//! x86-64（Linux）向けのアセンブリ（GNU as、AT&T 記法）を出す。
+//! x86-64（Linux と Windows）向けのアセンブリ（GNU as、AT&T 記法）を出す。
 //!
 //! C ライブラリは使わない。表示や文字列の連結などは、ランタイム（runtime/orz_runtime.c）が受け持つ。
 //! 起動の流れ：`_start` → `orz_rt_start`（C）→ `orz_entry`（ここで出す）→ `main`。
@@ -8,7 +8,8 @@
 //! `decnum` はビットのまま持ち、計算するときだけ %xmm0・%xmm1 に移す。
 //!
 //! 関数の呼び出し方は C（System V ABI）と同じ：引数は %rdi, %rsi, %rdx, %rcx, %r8, %r9、
-//! 7 個目からはスタック、戻り値は %rax。
+//! 7 個目からはスタック、戻り値は %rax。Windows でも同じ（ランタイムもこの呼び出し方でコンパイルする）。
+//! Linux と Windows で違うのは、セクションの書き方と、大きなスタックの広げ方だけ。
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -19,10 +20,18 @@ use crate::source::{SourceFile, Span};
 
 const ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
 
+/// 実行ファイルを動かす OS。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Os {
+    Linux,
+    Windows,
+}
+
 /// `gc_disabled` なら GC を動かさない（終了時にまとめて解放する）。
-pub fn emit(prog: &ir::Program, srcs: &[SourceFile], gc_disabled: bool) -> String {
+pub fn emit(prog: &ir::Program, srcs: &[SourceFile], os: Os, gc_disabled: bool) -> String {
     let mut g = Gen {
         out: String::new(),
+        os,
         gc_disabled,
         srcs,
         prog,
@@ -60,6 +69,7 @@ type Site = (u32, usize);
 
 struct Gen<'a> {
     out: String,
+    os: Os,
     gc_disabled: bool,
     srcs: &'a [SourceFile],
     prog: &'a ir::Program,
@@ -209,7 +219,12 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, "\n# function {}\n{}:", f.name, f.symbol);
         asm!(self, "pushq %rbp");
         asm!(self, "movq %rsp, %rbp");
-        if frame > 0 {
+        if self.os == Os::Windows && frame >= 4096 {
+            // Windows のスタックは、1 ページずつ順に触らないと広がらない。
+            asm!(self, "movq ${}, %rax", frame);
+            asm!(self, "call ___chkstk_ms");
+            asm!(self, "subq %rax, %rsp");
+        } else if frame > 0 {
             asm!(self, "subq ${}, %rsp", frame);
         }
         // 引数を変数の場所に写す。
@@ -820,7 +835,14 @@ impl<'a> Gen<'a> {
     }
 
     fn data(&mut self) {
-        let _ = writeln!(self.out, "\n\t.section .rodata");
+        match self.os {
+            Os::Linux => {
+                let _ = writeln!(self.out, "\n\t.section .rodata");
+            }
+            Os::Windows => {
+                let _ = writeln!(self.out, "\n\t.section .rdata,\"dr\"");
+            }
+        }
         // 文字列リテラル：長さ（8 バイト）の後ろに中身と 0。
         for (i, s) in self.prog.strings.iter().enumerate() {
             asm!(self, ".balign 8");
@@ -881,8 +903,10 @@ impl<'a> Gen<'a> {
         asm!(self, ".globl orz_gc_disabled");
         let _ = writeln!(self.out, "orz_gc_disabled:");
         asm!(self, ".quad {}", self.gc_disabled as i32);
-        // 実行できるスタックは要らない、という印。
-        let _ = writeln!(self.out, "\n\t.section .note.GNU-stack,\"\",@progbits");
+        if self.os == Os::Linux {
+            // 実行できるスタックは要らない、という印。
+            let _ = writeln!(self.out, "\n\t.section .note.GNU-stack,\"\",@progbits");
+        }
     }
 
     /// 0 終端のバイト列。日本語や記号をそのまま入れられるよう、数で書く。
