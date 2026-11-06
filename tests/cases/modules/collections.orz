@@ -1,0 +1,21 @@
+export struct Stack:T {
+    items:array:T;
+    size:32;
+}
+
+export function Stack:T new_stack:T(capacity:32) {
+    return Stack:T(array(capacity), 0);
+}
+
+export function nothing push:T(s:Stack:T, v:T) {
+    s.items[s.size] = v;
+    s.size = s.size + 1;
+}
+
+export function maybe:T pop:T(s:Stack:T) {
+    if (s.size == 0) {
+        return null;
+    }
+    s.size = s.size - 1;
+    return s.items[s.size];
+}

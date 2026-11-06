@@ -1,0 +1,5 @@
+// error: 型の関数は、null でないことを確かめてから呼びます
+function nothing main() {
+    f:maybe:function:nothing() = null;
+    f();
+}

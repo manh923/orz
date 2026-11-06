@@ -20,6 +20,8 @@ pub enum Operand {
     Imm(i64),
     /// 文字列リテラルのアドレス（`Program::strings` の番号）。
     Str(u32),
+    /// 関数のアドレス（`Program::funcs` の番号）。関数ポインタに使う。
+    Func(u32),
 }
 
 /// 変数の書き込み先。
@@ -199,6 +201,8 @@ pub enum Inst {
     Call { dst: Option<u32>, func: u32, args: Vec<Operand> },
     /// ランタイムの関数を呼ぶ。
     CallRt { dst: Option<u32>, func: Rt, args: Vec<Operand>, span: Span },
+    /// 関数ポインタで呼ぶ。
+    CallIndirect { dst: Option<u32>, target: Operand, args: Vec<Operand> },
     Label(u32),
     Jump(u32),
     /// `cond` が 0 でなければ `then` へ、0 なら `els` へ。

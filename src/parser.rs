@@ -124,9 +124,7 @@ impl Parser {
     fn struct_def(&mut self) -> PResult<StructDef> {
         self.bump(); // struct
         let (name, name_span) = self.ident("構造体の名前")?;
-        if self.peek() == &Tok::Colon {
-            return Err(self.not_yet("ジェネリクス（`struct 名前:T`）"));
-        }
+        let type_params = self.type_params()?;
         self.expect(Tok::LBrace, "構造体の始まりの")?;
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
@@ -161,6 +159,7 @@ impl Parser {
             name_span,
             fields,
             exported: false,
+            type_params,
         })
     }
 
@@ -207,11 +206,16 @@ impl Parser {
                     .hint("例：function 32 add(a:32, b:32) { ... }"),
             );
         }
+        if let Tok::Ident(_) = self.peek() {
+            // `function add(...)` のように戻り値の型を書き忘れた。
+            if matches!(self.peek_at(1), Tok::LParen | Tok::Colon) && !self.ret_type_ahead() {
+                return Err(Diag::new(self.span(), "関数の戻り値の型がありません")
+                    .hint("値を返さないなら `function nothing 名前(...)` と書きます"));
+            }
+        }
         let ret = self.ret_type()?;
         let (name, name_span) = self.ident("関数の名前")?;
-        if self.peek() == &Tok::Colon {
-            return Err(self.not_yet("ジェネリクス"));
-        }
+        let type_params = self.type_params()?;
         self.expect(Tok::LParen, "引数の始まりの")?;
         let mut params = Vec::new();
         if !self.eat(&Tok::RParen) {
@@ -245,6 +249,7 @@ impl Parser {
             params,
             body,
             exported: false,
+            type_params,
         })
     }
 
@@ -252,32 +257,39 @@ impl Parser {
         if self.peek() == &Tok::Kw(Kw::Nothing) {
             return Ok(RetType::Nothing(self.bump().span));
         }
-        if let Tok::Ident(_) = self.peek() {
-            // `function add(...)` のように戻り値の型を書き忘れた。
-            if self.peek_at(1) == &Tok::LParen {
-                return Err(Diag::new(self.span(), "関数の戻り値の型がありません")
-                    .hint("値を返さないなら `function nothing 名前(...)` と書きます"));
-            }
-        }
         Ok(RetType::Type(self.type_expr()?))
     }
 
     // ---------------- 型 ----------------
 
+    /// 型。`:` で続くものはすべて並べて読む（区切りは意味解析で決める）。
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let lo = self.span();
+        let mut atoms = vec![self.type_atom()?];
+        while self.peek() == &Tok::Colon && can_start_type(self.peek_at(1)) {
+            self.bump();
+            atoms.push(self.type_atom()?);
+        }
+        Ok(TypeExpr {
+            atoms,
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    fn type_atom(&mut self) -> PResult<TypeAtom> {
         let lo = self.span();
         let kind = match self.peek().clone() {
             Tok::Int(8) => {
                 self.bump();
-                TypeKind::Int(IntTy::U8)
+                AtomKind::Int(IntTy::U8)
             }
             Tok::Int(32) => {
                 self.bump();
-                TypeKind::Int(IntTy::I32)
+                AtomKind::Int(IntTy::I32)
             }
             Tok::Int(64) => {
                 self.bump();
-                TypeKind::Int(IntTy::I64)
+                AtomKind::Int(IntTy::I64)
             }
             Tok::Int(n) => {
                 return Err(Diag::new(lo, format!("`{}` という型はありません", n))
@@ -285,35 +297,33 @@ impl Parser {
             }
             Tok::Kw(Kw::Bool) => {
                 self.bump();
-                TypeKind::Bool
+                AtomKind::Bool
             }
             Tok::Kw(Kw::Decnum) => {
                 self.bump();
-                TypeKind::Decnum
+                AtomKind::Decnum
             }
             Tok::Kw(Kw::String) => {
                 self.bump();
-                TypeKind::String
+                AtomKind::String
             }
             Tok::Kw(Kw::Address) => {
                 self.bump();
-                TypeKind::Address
+                AtomKind::Address
             }
             Tok::Kw(k @ (Kw::Pointer | Kw::Array | Kw::Maybe)) => {
                 self.bump();
-                if self.peek() != &Tok::Colon {
+                if self.peek() != &Tok::Colon || !can_start_type(self.peek_at(1)) {
                     return Err(Diag::new(
                         self.span(),
                         format!("`{}` の後に `:` と型が必要です", k.as_str()),
                     )
                     .hint(format!("例：{}:32", k.as_str())));
                 }
-                self.bump();
-                let inner = Box::new(self.type_expr()?);
                 match k {
-                    Kw::Pointer => TypeKind::Pointer(inner),
-                    Kw::Array => TypeKind::Array(inner),
-                    _ => TypeKind::Maybe(inner),
+                    Kw::Pointer => AtomKind::Pointer,
+                    Kw::Array => AtomKind::Array,
+                    _ => AtomKind::Maybe,
                 }
             }
             Tok::Kw(Kw::Function) => {
@@ -332,24 +342,37 @@ impl Parser {
                         break;
                     }
                 }
-                TypeKind::Function(Box::new(ret), params)
+                AtomKind::Function(Box::new(ret), params)
             }
             Tok::Ident(name) => {
                 self.bump();
                 // `util.Point` のように、名前空間の付いた構造体の名前。
                 if self.eat(&Tok::Dot) {
                     let (inner, _) = self.ident("構造体の名前")?;
-                    TypeKind::Named(Some(name), inner)
+                    AtomKind::Named(Some(name), inner)
                 } else {
-                    TypeKind::Named(None, name)
+                    AtomKind::Named(None, name)
                 }
             }
             _ => return Err(self.unexpected("型")),
         };
-        Ok(TypeExpr {
+        Ok(TypeAtom {
             kind,
             span: lo.to(self.prev_span()),
         })
+    }
+
+    /// 名前の後ろの `:T:U`（ジェネリクスの型引数の名前）。
+    fn type_params(&mut self) -> PResult<Vec<String>> {
+        let mut params = Vec::new();
+        while self.eat(&Tok::Colon) {
+            let (name, span) = self.ident("型引数の名前")?;
+            if params.contains(&name) {
+                return Err(Diag::new(span, format!("型引数 `{}` が 2 つあります", name)));
+            }
+            params.push(name);
+        }
+        Ok(params)
     }
 
     // ---------------- 文 ----------------
@@ -406,8 +429,11 @@ impl Parser {
 
     fn stmt(&mut self) -> PResult<Stmt> {
         let lo = self.span();
+        let decl_ahead = matches!(self.peek(), Tok::Ident(_))
+            && self.peek_at(1) == &Tok::Colon
+            && !self.generic_call_ahead();
         let kind = match self.peek() {
-            Tok::Ident(_) if self.peek_at(1) == &Tok::Colon => StmtKind::Decl(self.decl(false)?),
+            Tok::Ident(_) if decl_ahead => StmtKind::Decl(self.decl(false)?),
             Tok::Kw(Kw::Immutable) => {
                 return Err(Diag::new(lo, "`immutable` はグローバル変数にだけ付けられます")
                     .hint("関数の外（ファイルのいちばん外側）で宣言してください"))
@@ -463,6 +489,24 @@ impl Parser {
             kind,
             span: lo.to(self.prev_span()),
         })
+    }
+
+    /// `function` の後ろが「型 名前」の形か（`function T get:T(…)` なら真、`function get:T(…)` なら偽）。
+    fn ret_type_ahead(&mut self) -> bool {
+        let save = self.pos;
+        let ok = self.type_expr().is_ok() && matches!(self.peek(), Tok::Ident(_));
+        self.pos = save;
+        ok
+    }
+
+    /// 文の先頭の `名前:型` の後ろが `(` なら、宣言ではなく `get:32(…)` という呼び出し。
+    fn generic_call_ahead(&mut self) -> bool {
+        let save = self.pos;
+        self.bump();
+        self.bump();
+        let ok = self.type_expr().is_ok() && self.peek() == &Tok::LParen;
+        self.pos = save;
+        ok
     }
 
     /// `if` や `while` の `( 条件 )`。
@@ -599,6 +643,19 @@ impl Parser {
         let mut e = self.primary()?;
         loop {
             match self.peek() {
+                // `get:32(…)`、`List:32(…)`：型を付けた関数・構造体の名前。
+                Tok::Colon
+                    if matches!(e.kind, ExprKind::Var(_) | ExprKind::Field(..))
+                        && can_start_type(self.peek_at(1)) =>
+                {
+                    self.bump();
+                    let ty = self.type_expr()?;
+                    let span = e.span.to(ty.span);
+                    e = Expr {
+                        kind: ExprKind::Generic(Box::new(e), ty),
+                        span,
+                    };
+                }
                 Tok::LParen => {
                     self.bump();
                     let args = self.args(Tok::RParen)?;
@@ -737,6 +794,25 @@ impl Parser {
             span: lo.to(self.prev_span()),
         })
     }
+}
+
+/// 型の始まりになれるトークンか。
+fn can_start_type(t: &Tok) -> bool {
+    matches!(
+        t,
+        Tok::Int(_)
+            | Tok::Ident(_)
+            | Tok::Kw(
+                Kw::Bool
+                    | Kw::Decnum
+                    | Kw::String
+                    | Kw::Address
+                    | Kw::Pointer
+                    | Kw::Array
+                    | Kw::Maybe
+                    | Kw::Function
+            )
+    )
 }
 
 #[cfg(test)]

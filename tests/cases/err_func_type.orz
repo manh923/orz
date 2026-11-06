@@ -1,0 +1,8 @@
+// error: `function:32(64, 32)` 型の値が必要ですが、この式は `function:32(32, 32)` 型です
+function 32 add(a:32, b:32) {
+    return a + b;
+}
+
+function nothing main() {
+    f:function:32(64, 32) = add;
+}

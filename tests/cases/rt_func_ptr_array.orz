@@ -1,0 +1,10 @@
+// runtime: 配列の範囲外です（添字 2、長さ 2）
+function 32 one() {
+    return 1;
+}
+
+function 32 main() {
+    fs:array:function:32() = [one, one];
+    i:32 = 2;
+    return fs[i]();
+}

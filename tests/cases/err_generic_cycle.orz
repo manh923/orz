@@ -1,0 +1,7 @@
+// error: maybe を付けずに自分自身を含んでいます
+struct L:T {
+    next:L:T;
+}
+
+function nothing main() {
+}

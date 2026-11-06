@@ -1,0 +1,10 @@
+// error: 型引数 `T` が、引数から決まりません
+import stdio;
+
+function maybe:T none:T() {
+    return null;
+}
+
+function nothing main() {
+    stdio.print(none());
+}

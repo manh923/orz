@@ -1,0 +1,10 @@
+// error: ジェネリクスの関数 `id` の型引数が決まりません
+import stdio;
+
+function T id:T(x:T) {
+    return x;
+}
+
+function nothing main() {
+    stdio.print(id);
+}

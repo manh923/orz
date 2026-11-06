@@ -250,6 +250,13 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
                 }
                 None
             }
+            Inst::CallIndirect { target, args, .. } => {
+                *target = subst(&known, *target);
+                for a in args.iter_mut() {
+                    *a = subst(&known, *a);
+                }
+                None
+            }
             Inst::Branch { cond, then, els } => {
                 *cond = subst(&known, *cond);
                 match *cond {

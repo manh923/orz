@@ -1,0 +1,8 @@
+// error: `Box` には型を 1 つ付けます（例：Box:32）
+struct Box:T {
+    v:T;
+}
+
+function nothing main() {
+    b:Box = Box:32(1);
+}

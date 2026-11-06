@@ -147,6 +147,10 @@ impl<'a> Gen<'a> {
                 asm!(self, "movq {}, {}", s, reg)
             }
             Operand::Str(i) => asm!(self, "leaq .Lstr{}(%rip), {}", i, reg),
+            Operand::Func(i) => {
+                let s = &self.prog.funcs[i as usize].symbol;
+                asm!(self, "leaq {}(%rip), {}", s, reg)
+            }
         }
     }
 
@@ -334,6 +338,12 @@ impl<'a> Gen<'a> {
                 span,
             } => {
                 self.call_rt(*func, args, *span);
+                if let Some(d) = dst {
+                    self.store_temp(*d);
+                }
+            }
+            Inst::CallIndirect { dst, target, args } => {
+                self.call_with_target(None, Some(*target), args, &[]);
                 if let Some(d) = dst {
                     self.store_temp(*d);
                 }
@@ -721,6 +731,17 @@ impl<'a> Gen<'a> {
     /// 関数を呼ぶ。`extra` は、引数の後ろに足すアドレス（`leaq …` で入れる）。
     /// 引数の 7 個目からは逆順にスタックに積み、呼ぶ時点で %rsp を 16 の倍数にそろえる。
     fn call(&mut self, name: &str, args: &[Operand], extra: &[String]) {
+        self.call_with_target(Some(name), None, args, extra);
+    }
+
+    /// `name` を呼ぶか、`target`（関数ポインタ）を呼ぶ。
+    fn call_with_target(
+        &mut self,
+        name: Option<&str>,
+        target: Option<Operand>,
+        args: &[Operand],
+        extra: &[String],
+    ) {
         let total = args.len() + extra.len();
         assert!(
             extra.is_empty() || total <= ARG_REGS.len(),
@@ -741,7 +762,15 @@ impl<'a> Gen<'a> {
         for (src, reg) in extra.iter().zip(ARG_REGS.iter().skip(args.len())) {
             asm!(self, "leaq {}(%rip), {}", src, reg);
         }
-        asm!(self, "call {}", name);
+        match (name, target) {
+            (Some(name), _) => asm!(self, "call {}", name),
+            (None, Some(t)) => {
+                // %r11 は引数に使わないレジスタ。
+                self.load(t, "%r11");
+                asm!(self, "call *%r11");
+            }
+            (None, None) => unreachable!("呼ぶ先がない"),
+        }
         let cleanup = nstack * 8 + pad;
         if cleanup > 0 {
             asm!(self, "addq ${}, %rsp", cleanup);

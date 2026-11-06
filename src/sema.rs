@@ -1,12 +1,16 @@
 //! 型の確認と、中間表現への変換。
 //!
-//! 今できるのは手順 6 まで：
+//! 今できるのは手順 7 の途中まで：
 //!   整数（`8`・`32`・`64`）、`bool`、`decnum`、`address`、`string`、`array`、`pointer`、構造体、
 //!   `maybe` と `null`、`to:型(x)`、変数、`if`、`while`、関数呼び出し、グローバル変数、
-//!   `import stdio;` と自分のファイルの `import`・`export`。
+//!   `import stdio;` と自分のファイルの `import`・`export`、関数ポインタ、ジェネリクス。
 //! それ以外の書き方は、構文としては読めても「まだ実装していません」のエラーにする。
 //!
 //! ファイル（モジュール）は 0 番が最初に渡されたファイルで、`Span::file` もこの番号になる。
+//!
+//! ジェネリクスは、使われた型ごとに別の関数・構造体としてコンパイルする。
+//! ジェネリクスの関数は、定義の時点で一度、`T` を中身のわからない型（`Ty::Param`）として確かめる。
+//! そのため `T` に `+` や `<` を使うと、使われる前でもエラーになる。
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -17,7 +21,7 @@ use crate::ir::{self, CmpOp, ConstVal, FOp, Inst, IrBinOp, Operand, Place, Rt, W
 use crate::source::{Diag, Span};
 
 /// 値の型。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int(IntTy),
     Address,
@@ -29,6 +33,10 @@ pub enum Ty {
     Maybe(Box<Ty>),
     /// 構造体（番号と名前）。値はアドレス。
     Struct(usize, Rc<str>),
+    /// 関数ポインタ（戻り値の型、引数の型）。戻り値の `None` は `nothing`。
+    Func(Option<Box<Ty>>, Vec<Ty>),
+    /// ジェネリクスの型引数。定義を確かめるときだけ使う、中身のわからない型。
+    Param(u32, Rc<str>),
     /// `null` そのもの。`maybe` の付いた型にだけ入れられる。
     Null,
 }
@@ -46,7 +54,12 @@ impl Ty {
             Ty::Pointer(t) => format!("pointer:{}", t.name()),
             Ty::Array(t) => format!("array:{}", t.name()),
             Ty::Maybe(t) => format!("maybe:{}", t.name()),
-            Ty::Struct(_, name) => name.to_string(),
+            Ty::Struct(_, name) | Ty::Param(_, name) => name.to_string(),
+            Ty::Func(ret, params) => {
+                let ret = ret.as_ref().map(|t| t.name()).unwrap_or_else(|| "nothing".into());
+                let params: Vec<String> = params.iter().map(|t| t.name()).collect();
+                format!("function:{}({})", ret, params.join(", "))
+            }
             Ty::Null => "null".into(),
         }
     }
@@ -78,9 +91,20 @@ impl Ty {
     }
 
     /// `maybe` を付けたとき、値を箱に入れるか（整数などの値の型）。
-    /// string・array・pointer・構造体はアドレスなので、null を 0 で表せば箱は要らない。
+    /// string・array・pointer・構造体・関数はアドレスなので、null を 0 で表せば箱は要らない。
     fn needs_box(&self) -> bool {
         matches!(self, Ty::Int(_) | Ty::Bool | Ty::Address | Ty::Dec)
+    }
+
+    fn contains_param(&self) -> bool {
+        match self {
+            Ty::Param(..) => true,
+            Ty::Pointer(t) | Ty::Array(t) | Ty::Maybe(t) => t.contains_param(),
+            Ty::Func(r, ps) => {
+                r.as_ref().is_some_and(|t| t.contains_param()) || ps.iter().any(Ty::contains_param)
+            }
+            _ => false,
+        }
     }
 
     /// 表示するときの型の説明（ランタイムの orz_rt_put が読む）。
@@ -92,7 +116,7 @@ impl Ty {
             Ty::Bool => "B".into(),
             Ty::Dec => "d".into(),
             Ty::Str => "s".into(),
-            Ty::Pointer(_) | Ty::Address => "p".into(),
+            Ty::Pointer(_) | Ty::Address | Ty::Func(..) | Ty::Param(..) => "p".into(),
             Ty::Null => "n".into(),
             Ty::Maybe(t) if t.needs_box() => format!("M{}", t.desc()),
             Ty::Maybe(t) => format!("m{}", t.desc()),
@@ -117,6 +141,12 @@ fn not_yet(span: Span, what: &str, step: u32) -> Diag {
 /// `import` なしで使える組み込みの関数。
 const BUILTINS: &[&str] = &["allocate", "length", "size", "bytes", "copy", "collect"];
 
+/// ジェネリクスを展開しすぎないための上限（型が無限に大きくなる書き方を止める）。
+const MAX_INSTANCES: usize = 200;
+
+/// ジェネリクスの型引数と、その型。
+type TParams = Vec<(String, Ty)>;
+
 // ---------------- プログラム全体 ----------------
 
 #[derive(Clone)]
@@ -127,6 +157,30 @@ struct FuncSig {
     ret: Option<Ty>,
     exported: bool,
     symbol: String,
+}
+
+impl FuncSig {
+    fn ty(&self) -> Ty {
+        Ty::Func(self.ret.clone().map(Box::new), self.params.clone())
+    }
+}
+
+/// コンパイルする関数（普通の関数と、ジェネリクスを展開したもの）。
+struct FuncInfo<'p> {
+    sig: FuncSig,
+    ast: &'p Func,
+    module: usize,
+    tparams: TParams,
+}
+
+/// ジェネリクスの関数の定義。
+struct GenericFunc<'p> {
+    ast: &'p Func,
+    module: usize,
+    /// 引数と戻り値の型（型引数は `Ty::Param` のまま）。
+    params: Vec<Ty>,
+    ret: Option<Ty>,
+    instances: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,15 +208,28 @@ struct FieldInfo {
 struct StructInfo<'p> {
     def: &'p StructDef,
     module: usize,
+    /// 表示用の名前（`List:32` など）。
+    name: Rc<str>,
     fields: Vec<FieldInfo>,
     size: i64,
+    /// ジェネリクスを展開したものなら、どの定義をどの型で展開したか。
+    origin: Option<(usize, Vec<Ty>)>,
+}
+
+/// ジェネリクスの構造体の定義。
+struct GenericStruct<'p> {
+    def: &'p StructDef,
+    module: usize,
+    instances: usize,
 }
 
 #[derive(Clone, Copy)]
 enum TopName {
     Func(usize),
+    GenericFunc(usize),
     Global(usize),
     Struct(usize),
+    GenericStruct(usize),
 }
 
 /// `import` した名前空間が指すもの。
@@ -179,19 +246,23 @@ struct ModInfo<'p> {
     imports: HashMap<String, ModRef>,
 }
 
-/// `ns.name` が指すもの。
-enum Member {
+/// 名前（`name` か `ns.name`）が指すもの。
+enum Target {
     Stdio,
-    Func(usize),
-    Global(usize),
-    Struct(usize),
+    Top(TopName),
 }
 
 struct Ctx<'p> {
     mods: Vec<ModInfo<'p>>,
-    funcs: Vec<FuncSig>,
+    funcs: Vec<FuncInfo<'p>>,
+    generic_funcs: Vec<GenericFunc<'p>>,
+    func_instances: HashMap<(usize, Vec<Ty>), usize>,
+    /// 中身をまだ変換していない、展開したジェネリクスの関数。
+    pending: Vec<usize>,
     globals: Vec<GlobalInfo<'p>>,
     structs: Vec<StructInfo<'p>>,
+    generic_structs: Vec<GenericStruct<'p>>,
+    struct_instances: HashMap<(usize, Vec<Ty>), usize>,
     strings: Vec<Vec<u8>>,
     string_ids: HashMap<Vec<u8>, u32>,
 }
@@ -232,11 +303,21 @@ impl<'p> Ctx<'p> {
     }
 
     fn struct_ty(&self, i: usize) -> Ty {
-        Ty::Struct(i, Rc::from(self.structs[i].def.name.as_str()))
+        Ty::Struct(i, self.structs[i].name.clone())
+    }
+
+    fn exported(&self, top: TopName) -> bool {
+        match top {
+            TopName::Func(i) => self.funcs[i].sig.exported,
+            TopName::GenericFunc(g) => self.generic_funcs[g].ast.exported,
+            TopName::Global(i) => self.globals[i].decl.exported,
+            TopName::Struct(i) => self.structs[i].def.exported,
+            TopName::GenericStruct(g) => self.generic_structs[g].def.exported,
+        }
     }
 
     /// `ns.name` を探す。ほかのファイルのものは `export` されていなければ使えない。
-    fn member(&self, m: usize, ns: &str, name: &str, span: Span) -> Result<Member, Diag> {
+    fn member(&self, m: usize, ns: &str, name: &str, span: Span) -> Result<Target, Diag> {
         let Some(r) = self.mods[m].imports.get(ns).copied() else {
             return Err(
                 Diag::new(span, format!("`{}` という名前空間はありません", ns)).hint(format!(
@@ -246,60 +327,245 @@ impl<'p> Ctx<'p> {
             );
         };
         let m2 = match r {
-            ModRef::Stdio => return Ok(Member::Stdio),
+            ModRef::Stdio => return Ok(Target::Stdio),
             ModRef::File(m2) => m2,
         };
-        let (top, exported) = match self.top(m2, name) {
-            Some(t @ TopName::Func(i)) => (t, self.funcs[i].exported),
-            Some(t @ TopName::Global(i)) => (t, self.globals[i].decl.exported),
-            Some(t @ TopName::Struct(i)) => (t, self.structs[i].def.exported),
-            None => return Err(Diag::new(span, format!("`{}` に `{}` はありません", ns, name))),
+        let Some(top) = self.top(m2, name) else {
+            return Err(Diag::new(span, format!("`{}` に `{}` はありません", ns, name)));
         };
-        if !exported {
+        if !self.exported(top) {
             return Err(
                 Diag::new(span, format!("`{}` の `{}` は export されていません", ns, name))
                     .hint("ほかのファイルから使わせたいなら、定義の前に `export` を付けます"),
             );
         }
-        Ok(match top {
-            TopName::Func(i) => Member::Func(i),
-            TopName::Global(i) => Member::Global(i),
-            TopName::Struct(i) => Member::Struct(i),
+        Ok(Target::Top(top))
+    }
+
+    /// 名前（`name` または `ns.name`）を探す。
+    fn find(&self, m: usize, ns: Option<&str>, name: &str, span: Span) -> Result<Option<Target>, Diag> {
+        match ns {
+            Some(ns) => self.member(m, ns, name, span).map(Some),
+            None => Ok(self.top(m, name).map(Target::Top)),
+        }
+    }
+
+    /// ソースに書かれた型を確かめる。`m` は書かれているファイル、`tp` はジェネリクスの型引数。
+    fn resolve_type(&mut self, m: usize, t: &TypeExpr, tp: &TParams) -> Result<Ty, Diag> {
+        let mut pos = 0;
+        let ty = self.resolve_atoms(m, &t.atoms, &mut pos, tp)?;
+        if pos < t.atoms.len() {
+            return Err(Diag::new(t.atoms[pos].span, "型の後ろに、余分な `:…` があります")
+                .hint("型引数の数が、定義と合っているか確かめてください"));
+        }
+        Ok(ty)
+    }
+
+    /// `:` で並んだ型を、型引数の数に従って 1 つ読む。
+    fn resolve_atoms(
+        &mut self,
+        m: usize,
+        atoms: &[TypeAtom],
+        pos: &mut usize,
+        tp: &TParams,
+    ) -> Result<Ty, Diag> {
+        let a = &atoms[*pos];
+        *pos += 1;
+        let next = |ctx: &mut Self, pos: &mut usize, what: &str| -> Result<Ty, Diag> {
+            if *pos >= atoms.len() {
+                return Err(Diag::new(a.span, format!("{}の後に `:` と型が必要です", what)));
+            }
+            ctx.resolve_atoms(m, atoms, pos, tp)
+        };
+        Ok(match &a.kind {
+            AtomKind::Int(it) => Ty::Int(*it),
+            AtomKind::Bool => Ty::Bool,
+            AtomKind::Decnum => Ty::Dec,
+            AtomKind::String => Ty::Str,
+            AtomKind::Address => Ty::Address,
+            AtomKind::Pointer => Ty::Pointer(Box::new(next(self, pos, "`pointer` ")?)),
+            AtomKind::Array => Ty::Array(Box::new(next(self, pos, "`array` ")?)),
+            AtomKind::Maybe => match next(self, pos, "`maybe` ")? {
+                Ty::Maybe(_) => return Err(Diag::new(a.span, "`maybe` は重ねて付けられません")),
+                i => Ty::Maybe(Box::new(i)),
+            },
+            AtomKind::Function(ret, params) => {
+                let ret = match &**ret {
+                    RetType::Nothing(_) => None,
+                    RetType::Type(t) => Some(Box::new(self.resolve_type(m, t, tp)?)),
+                };
+                let mut ps = Vec::new();
+                for p in params {
+                    ps.push(self.resolve_type(m, p, tp)?);
+                }
+                Ty::Func(ret, ps)
+            }
+            AtomKind::Named(None, name) if tp.iter().any(|(n, _)| n == name) => {
+                tp.iter().find(|(n, _)| n == name).unwrap().1.clone()
+            }
+            AtomKind::Named(ns, name) => {
+                let shown = match ns {
+                    Some(ns) => format!("{}.{}", ns, name),
+                    None => name.clone(),
+                };
+                match self.find(m, ns.as_deref(), name, a.span)? {
+                    Some(Target::Top(TopName::Struct(i))) => self.struct_ty(i),
+                    Some(Target::Top(TopName::GenericStruct(g))) => {
+                        let n = self.generic_structs[g].def.type_params.len();
+                        let mut args = Vec::new();
+                        for _ in 0..n {
+                            if *pos >= atoms.len() {
+                                return Err(Diag::new(
+                                    a.span,
+                                    format!("`{}` には型を {} つ付けます（例：{}:32）", shown, n, shown),
+                                ));
+                            }
+                            args.push(self.resolve_atoms(m, atoms, pos, tp)?);
+                        }
+                        let i = self.instantiate_struct(g, args, a.span)?;
+                        self.struct_ty(i)
+                    }
+                    Some(_) => return Err(Diag::new(a.span, format!("`{}` は型ではありません", shown))),
+                    None => return Err(unknown_type(a.span, name)),
+                }
+            }
         })
     }
 
-    /// ソースに書かれた型を確かめる。`m` は書かれているファイル。
-    fn resolve_type(&self, m: usize, t: &TypeExpr) -> Result<Ty, Diag> {
-        Ok(match &t.kind {
-            TypeKind::Int(it) => Ty::Int(*it),
-            TypeKind::Bool => Ty::Bool,
-            TypeKind::Decnum => Ty::Dec,
-            TypeKind::String => Ty::Str,
-            TypeKind::Address => Ty::Address,
-            TypeKind::Pointer(inner) => Ty::Pointer(Box::new(self.resolve_type(m, inner)?)),
-            TypeKind::Array(inner) => Ty::Array(Box::new(self.resolve_type(m, inner)?)),
-            TypeKind::Maybe(inner) => match self.resolve_type(m, inner)? {
-                Ty::Maybe(_) => return Err(Diag::new(t.span, "`maybe` は重ねて付けられません")),
-                i => Ty::Maybe(Box::new(i)),
-            },
-            TypeKind::Named(None, name) => match self.top(m, name) {
-                Some(TopName::Struct(i)) => self.struct_ty(i),
-                Some(_) => return Err(Diag::new(t.span, format!("`{}` は型ではありません", name))),
-                None => return Err(unknown_type(t.span, name)),
-            },
-            TypeKind::Named(Some(ns), name) => match self.member(m, ns, name, t.span)? {
-                Member::Struct(i) => self.struct_ty(i),
-                Member::Stdio => {
-                    return Err(Diag::new(
-                        t.span,
-                        format!("`{}` に `{}` という型はありません", ns, name),
-                    ))
-                }
-                _ => return Err(Diag::new(t.span, format!("`{}.{}` は型ではありません", ns, name))),
-            },
-            TypeKind::Function(..) => return Err(not_yet(t.span, "関数ポインタ", 7)),
-        })
+    /// 構造体のフィールドの型を決めて、C と同じ並べ方（それぞれの幅にそろえる）で並べる。
+    fn resolve_fields(&mut self, i: usize, tp: &TParams) -> Result<(), Diag> {
+        let (def, m) = (self.structs[i].def, self.structs[i].module);
+        let mut fields: Vec<FieldInfo> = Vec::new();
+        let mut offset = 0i64;
+        let mut align = 1i64;
+        for f in &def.fields {
+            if fields.iter().any(|x| x.name == f.name) {
+                return Err(Diag::new(
+                    f.span,
+                    format!("フィールド `{}` が 2 つあります", f.name),
+                ));
+            }
+            let ty = self.resolve_type(m, &f.ty, tp)?;
+            let w = ty.width().bytes();
+            offset = (offset + w - 1) / w * w;
+            align = align.max(w);
+            fields.push(FieldInfo {
+                name: f.name.clone(),
+                ty,
+                offset,
+            });
+            offset += w;
+        }
+        self.structs[i].size = (offset + align - 1) / align * align;
+        self.structs[i].fields = fields;
+        check_struct_cycle(self, i)
     }
+
+    /// ジェネリクスの構造体を、型を決めて展開する（同じ型なら前に作ったものを使う）。
+    fn instantiate_struct(&mut self, g: usize, args: Vec<Ty>, span: Span) -> Result<usize, Diag> {
+        let key = (g, args.clone());
+        if let Some(i) = self.struct_instances.get(&key) {
+            return Ok(*i);
+        }
+        let (def, module) = (self.generic_structs[g].def, self.generic_structs[g].module);
+        self.generic_structs[g].instances += 1;
+        if self.generic_structs[g].instances > MAX_INSTANCES {
+            return Err(
+                Diag::new(span, format!("構造体 `{}` の展開が多すぎます", def.name))
+                    .hint("型引数が、展開するたびに大きくなっていませんか"),
+            );
+        }
+        let shown: Vec<String> = args.iter().map(Ty::name).collect();
+        let i = self.structs.len();
+        self.structs.push(StructInfo {
+            def,
+            module,
+            name: Rc::from(format!("{}:{}", def.name, shown.join(":"))),
+            fields: Vec::new(),
+            size: 0,
+            origin: Some((g, args.clone())),
+        });
+        // 先に登録しておく（自分自身を maybe で含む構造体のため）。
+        self.struct_instances.insert(key, i);
+        let tp: TParams = def.type_params.iter().cloned().zip(args).collect();
+        self.resolve_fields(i, &tp)?;
+        Ok(i)
+    }
+
+    /// ジェネリクスの関数を、型を決めて展開する（同じ型なら前に作ったものを使う）。
+    fn instantiate_func(&mut self, g: usize, args: Vec<Ty>, span: Span) -> Result<usize, Diag> {
+        let key = (g, args.clone());
+        if let Some(i) = self.func_instances.get(&key) {
+            return Ok(*i);
+        }
+        let (ast, module) = (self.generic_funcs[g].ast, self.generic_funcs[g].module);
+        self.generic_funcs[g].instances += 1;
+        if self.generic_funcs[g].instances > MAX_INSTANCES {
+            return Err(Diag::new(span, format!("関数 `{}` の展開が多すぎます", ast.name))
+                .hint("型引数が、呼ぶたびに大きくなっていませんか"));
+        }
+        let tp: TParams = ast.type_params.iter().cloned().zip(args.clone()).collect();
+        let (params, ret) = self.func_types(module, ast, &tp)?;
+        let i = self.funcs.len();
+        let shown: Vec<String> = args.iter().map(Ty::name).collect();
+        self.funcs.push(FuncInfo {
+            sig: FuncSig {
+                name: format!("{}:{}", ast.name, shown.join(":")),
+                params,
+                ret,
+                exported: ast.exported,
+                symbol: format!("orz_f{}_{}_{}", module, ast.name, i),
+            },
+            ast,
+            module,
+            tparams: tp,
+        });
+        self.func_instances.insert(key, i);
+        self.pending.push(i);
+        Ok(i)
+    }
+
+    /// 関数の引数と戻り値の型。
+    fn func_types(&mut self, m: usize, f: &Func, tp: &TParams) -> Result<(Vec<Ty>, Option<Ty>), Diag> {
+        let mut params = Vec::new();
+        for p in &f.params {
+            params.push(self.resolve_type(m, &p.ty, tp)?);
+        }
+        let ret = match &f.ret {
+            RetType::Nothing(_) => None,
+            RetType::Type(t) => Some(self.resolve_type(m, t, tp)?),
+        };
+        Ok((params, ret))
+    }
+}
+
+/// maybe を付けずに自分自身を（ほかの構造体を通しても）含む構造体は、作れないのでエラーにする。
+fn check_struct_cycle(ctx: &Ctx, start: usize) -> Result<(), Diag> {
+    fn visit(ctx: &Ctx, i: usize, start: usize, seen: &mut HashSet<usize>) -> bool {
+        for f in &ctx.structs[i].fields {
+            if let Ty::Struct(j, _) = f.ty {
+                if j == start {
+                    return true;
+                }
+                if seen.insert(j) && visit(ctx, j, start, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    if visit(ctx, start, start, &mut HashSet::new()) {
+        let def = ctx.structs[start].def;
+        return Err(Diag::new(
+            def.name_span,
+            format!(
+                "構造体 `{}` が、maybe を付けずに自分自身を含んでいます（これでは作れません）",
+                ctx.structs[start].name
+            ),
+        )
+        .hint("自分と同じ構造体のフィールドには maybe を付けます（例：next:maybe:Node;）"));
+    }
+    Ok(())
 }
 
 fn unknown_type(span: Span, name: &str) -> Diag {
@@ -326,17 +592,92 @@ fn is_ident(s: &str) -> bool {
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// 型引数の型を、引数の型から決める。（`template` の `Ty::Param` を `bind` に入れる）
+fn unify(ctx: &Ctx, template: &Ty, actual: &Ty, bind: &mut [Option<Ty>]) {
+    match (template, actual) {
+        (Ty::Param(i, _), a) if *a != Ty::Null => {
+            if bind[*i as usize].is_none() {
+                bind[*i as usize] = Some(a.clone());
+            }
+        }
+        (Ty::Pointer(t), Ty::Pointer(a)) | (Ty::Array(t), Ty::Array(a)) | (Ty::Maybe(t), Ty::Maybe(a)) => {
+            unify(ctx, t, a, bind)
+        }
+        // maybe:T の引数に、null でない T の値を渡したとき。
+        (Ty::Maybe(t), a) => unify(ctx, t, a, bind),
+        (Ty::Func(tr, tps), Ty::Func(ar, aps)) => {
+            if let (Some(t), Some(a)) = (tr, ar) {
+                unify(ctx, t, a, bind);
+            }
+            for (t, a) in tps.iter().zip(aps) {
+                unify(ctx, t, a, bind);
+            }
+        }
+        (Ty::Struct(ti, _), Ty::Struct(ai, _)) => {
+            if let (Some((tg, targs)), Some((ag, aargs))) =
+                (&ctx.structs[*ti].origin, &ctx.structs[*ai].origin)
+            {
+                if tg == ag {
+                    for (t, a) in targs.iter().zip(aargs) {
+                        unify(ctx, t, a, bind);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 型引数を決まった型に置き換える（構造体の展開はしない。展開済みのものだけ使う）。
+fn subst(ctx: &Ctx, t: &Ty, bind: &[Ty]) -> Option<Ty> {
+    Some(match t {
+        Ty::Param(i, _) => bind.get(*i as usize)?.clone(),
+        Ty::Pointer(x) => Ty::Pointer(Box::new(subst(ctx, x, bind)?)),
+        Ty::Array(x) => Ty::Array(Box::new(subst(ctx, x, bind)?)),
+        Ty::Maybe(x) => Ty::Maybe(Box::new(subst(ctx, x, bind)?)),
+        Ty::Func(r, ps) => Ty::Func(
+            match r {
+                Some(r) => Some(Box::new(subst(ctx, r, bind)?)),
+                None => None,
+            },
+            ps.iter()
+                .map(|p| subst(ctx, p, bind))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        Ty::Struct(i, _)
+            if t.contains_param()
+                || ctx.structs[*i]
+                    .origin
+                    .as_ref()
+                    .is_some_and(|(_, a)| a.iter().any(Ty::contains_param)) =>
+        {
+            let (g, args) = ctx.structs[*i].origin.as_ref()?;
+            let args = args
+                .iter()
+                .map(|a| subst(ctx, a, bind))
+                .collect::<Option<Vec<_>>>()?;
+            let j = *ctx.struct_instances.get(&(*g, args))?;
+            ctx.struct_ty(j)
+        }
+        t => t.clone(),
+    })
+}
+
 /// `modules[0]` が最初に渡されたファイル。`import` の `resolved` は読み込むときに埋めておく。
 pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     let mut ctx = Ctx {
         mods: Vec::new(),
         funcs: Vec::new(),
+        generic_funcs: Vec::new(),
+        func_instances: HashMap::new(),
+        pending: Vec::new(),
         globals: Vec::new(),
         structs: Vec::new(),
+        generic_structs: Vec::new(),
+        struct_instances: HashMap::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
     };
-    let mut func_asts: Vec<(usize, &Func)> = Vec::new();
 
     // 1. import
     for prog in modules {
@@ -380,18 +721,33 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     }
 
     // 2. 名前を集める。関数は定義より前の行からでも呼べる。
+    let mut normal_funcs: Vec<(usize, &Func)> = Vec::new();
     for (m, prog) in modules.iter().enumerate() {
         for item in &prog.items {
             let (name, span, top) = match item {
-                Item::Func(f) => (&f.name, f.name_span, TopName::Func(func_asts.len())),
+                Item::Func(f) if f.type_params.is_empty() => {
+                    (&f.name, f.name_span, TopName::Func(normal_funcs.len()))
+                }
+                Item::Func(f) => (
+                    &f.name,
+                    f.name_span,
+                    TopName::GenericFunc(ctx.generic_funcs.len()),
+                ),
                 Item::Global(d) => (&d.name, d.name_span, TopName::Global(ctx.globals.len())),
-                Item::Struct(s) => (&s.name, s.name_span, TopName::Struct(ctx.structs.len())),
+                Item::Struct(s) if s.type_params.is_empty() => {
+                    (&s.name, s.name_span, TopName::Struct(ctx.structs.len()))
+                }
+                Item::Struct(s) => (
+                    &s.name,
+                    s.name_span,
+                    TopName::GenericStruct(ctx.generic_structs.len()),
+                ),
                 Item::Import(_) => continue,
             };
             let what = match top {
-                TopName::Func(_) => "関数の名前",
+                TopName::Func(_) | TopName::GenericFunc(_) => "関数の名前",
                 TopName::Global(_) => "グローバル変数の名前",
-                TopName::Struct(_) => "構造体の名前",
+                TopName::Struct(_) | TopName::GenericStruct(_) => "構造体の名前",
             };
             ctx.reserved(m, span, name, what)?;
             if ctx.mods[m].names.insert(name, top).is_some() {
@@ -401,7 +757,14 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
                 );
             }
             match item {
-                Item::Func(f) => func_asts.push((m, f)),
+                Item::Func(f) if f.type_params.is_empty() => normal_funcs.push((m, f)),
+                Item::Func(f) => ctx.generic_funcs.push(GenericFunc {
+                    ast: f,
+                    module: m,
+                    params: Vec::new(),
+                    ret: None,
+                    instances: 0,
+                }),
                 Item::Global(d) => ctx.globals.push(GlobalInfo {
                     decl: d,
                     module: m,
@@ -409,77 +772,70 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
                     state: GlobalState::Todo,
                     symbol: format!("orz_g{}_{}", m, d.name),
                 }),
-                Item::Struct(s) => ctx.structs.push(StructInfo {
+                Item::Struct(s) if s.type_params.is_empty() => ctx.structs.push(StructInfo {
                     def: s,
                     module: m,
+                    name: Rc::from(s.name.as_str()),
                     fields: Vec::new(),
                     size: 0,
+                    origin: None,
+                }),
+                Item::Struct(s) => ctx.generic_structs.push(GenericStruct {
+                    def: s,
+                    module: m,
+                    instances: 0,
                 }),
                 Item::Import(_) => {}
             }
         }
     }
 
-    // 3. 構造体のフィールド。C と同じ並べ方（それぞれの幅にそろえる）。
-    for i in 0..ctx.structs.len() {
-        let (def, m) = (ctx.structs[i].def, ctx.structs[i].module);
-        let mut fields: Vec<FieldInfo> = Vec::new();
-        let mut offset = 0i64;
-        let mut align = 1i64;
-        for f in &def.fields {
-            if fields.iter().any(|x| x.name == f.name) {
-                return Err(Diag::new(
-                    f.span,
-                    format!("フィールド `{}` が 2 つあります", f.name),
-                ));
-            }
-            let ty = ctx.resolve_type(m, &f.ty)?;
-            let w = ty.width().bytes();
-            offset = (offset + w - 1) / w * w;
-            align = align.max(w);
-            fields.push(FieldInfo {
-                name: f.name.clone(),
-                ty,
-                offset,
-            });
-            offset += w;
-        }
-        ctx.structs[i].size = (offset + align - 1) / align * align;
-        ctx.structs[i].fields = fields;
+    // 3. 構造体のフィールド。ジェネリクスの構造体は、型引数を中身のわからない型にして一度確かめる。
+    let nstructs = ctx.structs.len();
+    for i in 0..nstructs {
+        ctx.resolve_fields(i, &Vec::new())?;
     }
-    check_struct_cycles(&ctx)?;
+    for g in 0..ctx.generic_structs.len() {
+        let def = ctx.generic_structs[g].def;
+        let params = opaque_params(&def.type_params);
+        ctx.instantiate_struct(g, params, def.name_span)?;
+    }
 
     // 4. 関数の引数と戻り値の型。
-    for (m, f) in &func_asts {
-        let m = *m;
-        let mut seen = HashSet::new();
-        let mut params = Vec::new();
-        for p in &f.params {
-            if !seen.insert(p.name.as_str()) {
-                return Err(Diag::new(p.span, format!("引数 `{}` が 2 つあります", p.name)));
-            }
-            ctx.reserved(m, p.span, &p.name, "引数の名前")?;
-            if let Some(top) = ctx.top(m, &p.name) {
-                return Err(top_name_conflict(p.span, &p.name, top));
-            }
-            params.push(ctx.resolve_type(m, &p.ty)?);
-        }
-        let ret = match &f.ret {
-            RetType::Nothing(_) => None,
-            RetType::Type(t) => Some(ctx.resolve_type(m, t)?),
-        };
-        ctx.funcs.push(FuncSig {
-            name: f.name.clone(),
-            params,
-            ret,
-            exported: f.exported,
-            symbol: format!("orz_f{}_{}", m, f.name),
+    for (m, f) in &normal_funcs {
+        check_params(&ctx, *m, f)?;
+        let (params, ret) = ctx.func_types(*m, f, &Vec::new())?;
+        ctx.funcs.push(FuncInfo {
+            sig: FuncSig {
+                name: f.name.clone(),
+                params,
+                ret,
+                exported: f.exported,
+                symbol: format!("orz_f{}_{}", m, f.name),
+            },
+            ast: f,
+            module: *m,
+            tparams: Vec::new(),
         });
+    }
+    for g in 0..ctx.generic_funcs.len() {
+        let (f, m) = (ctx.generic_funcs[g].ast, ctx.generic_funcs[g].module);
+        check_params(&ctx, m, f)?;
+        let tp: TParams = f
+            .type_params
+            .iter()
+            .cloned()
+            .zip(opaque_params(&f.type_params))
+            .collect();
+        let (params, ret) = ctx.func_types(m, f, &tp)?;
+        ctx.generic_funcs[g].params = params;
+        ctx.generic_funcs[g].ret = ret;
     }
 
     // 5. グローバル変数の型と初期値（コンパイル時に計算する）。
     for i in 0..ctx.globals.len() {
-        ctx.globals[i].ty = ctx.resolve_type(ctx.globals[i].module, &ctx.globals[i].decl.ty)?;
+        let (m, decl) = (ctx.globals[i].module, ctx.globals[i].decl);
+        ctx.globals[i].ty = ctx.resolve_type(m, &decl.ty, &Vec::new())?;
     }
     for i in 0..ctx.globals.len() {
         ctx.eval_global(i)?;
@@ -488,6 +844,12 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     // 6. main（最初に渡されたファイルのもの）
     let main = match ctx.top(0, "main") {
         Some(TopName::Func(i)) => i,
+        Some(TopName::GenericFunc(g)) => {
+            return Err(Diag::new(
+                ctx.generic_funcs[g].ast.name_span,
+                "`main` はジェネリクスにできません",
+            ))
+        }
         Some(TopName::Global(i)) => {
             return Err(Diag::new(
                 ctx.globals[i].decl.name_span,
@@ -500,25 +862,45 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
                 "`main` は関数の名前に使います",
             ))
         }
+        Some(TopName::GenericStruct(g)) => {
+            return Err(Diag::new(
+                ctx.generic_structs[g].def.name_span,
+                "`main` は関数の名前に使います",
+            ))
+        }
         None => {
             return Err(Diag::new(Span::new(0, 0), "`main` 関数がありません")
                 .hint("プログラムは `function nothing main() { ... }` から始まります"))
         }
     };
-    let (main_returns, main_takes_args) = check_main(func_asts[main].1, &ctx.funcs[main])?;
+    let (main_returns, main_takes_args) = check_main(ctx.funcs[main].ast, &ctx.funcs[main].sig)?;
 
-    // 7. 関数の中身。
-    let mut funcs = Vec::new();
-    for (i, (m, f)) in func_asts.iter().enumerate() {
-        funcs.push(lower_func(&mut ctx, *m, i, f)?);
+    // 7. 関数の中身。ジェネリクスの関数は、まず中身のわからない型で確かめてから、使われた型ごとに変換する。
+    let mut lowered: Vec<Option<ir::Function>> = Vec::new();
+    for i in 0..ctx.funcs.len() {
+        lowered.push(Some(lower_func(&mut ctx, i)?));
     }
+    for g in 0..ctx.generic_funcs.len() {
+        check_generic_func(&mut ctx, g)?;
+    }
+    while let Some(i) = ctx.pending.pop() {
+        let f = lower_func(&mut ctx, i)?;
+        if lowered.len() <= i {
+            lowered.resize_with(i + 1, || None);
+        }
+        lowered[i] = Some(f);
+    }
+    let funcs: Vec<ir::Function> = lowered
+        .into_iter()
+        .map(|f| f.expect("すべての関数を変換済み"))
+        .collect();
 
     let struct_descs = ctx
         .structs
         .iter()
         .map(|s| {
             // 名前\0 と、フィールドごとに「名前\0 位置:型の説明\0」、最後に \0。
-            let mut d = s.def.name.as_bytes().to_vec();
+            let mut d = s.name.as_bytes().to_vec();
             d.push(0);
             for f in &s.fields {
                 d.extend_from_slice(f.name.as_bytes());
@@ -552,45 +934,34 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     })
 }
 
-/// maybe を付けずに自分自身を（ほかの構造体を通しても）含む構造体は、作れないのでエラーにする。
-fn check_struct_cycles(ctx: &Ctx) -> Result<(), Diag> {
-    // 0 = まだ、1 = 調べている途中、2 = 済み
-    fn visit(ctx: &Ctx, i: usize, state: &mut Vec<u8>) -> Result<(), Diag> {
-        if state[i] == 2 {
-            return Ok(());
+/// 型引数を、中身のわからない型にしたもの。
+fn opaque_params(names: &[String]) -> Vec<Ty> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| Ty::Param(i as u32, Rc::from(n.as_str())))
+        .collect()
+}
+
+fn check_params(ctx: &Ctx, m: usize, f: &Func) -> Result<(), Diag> {
+    let mut seen = HashSet::new();
+    for p in &f.params {
+        if !seen.insert(p.name.as_str()) {
+            return Err(Diag::new(p.span, format!("引数 `{}` が 2 つあります", p.name)));
         }
-        if state[i] == 1 {
-            let def = ctx.structs[i].def;
-            return Err(Diag::new(
-                def.name_span,
-                format!(
-                    "構造体 `{}` が、maybe を付けずに自分自身を含んでいます（これでは作れません）",
-                    def.name
-                ),
-            )
-            .hint("自分と同じ構造体のフィールドには maybe を付けます（例：next:maybe:Node;）"));
+        ctx.reserved(m, p.span, &p.name, "引数の名前")?;
+        if let Some(top) = ctx.top(m, &p.name) {
+            return Err(top_name_conflict(p.span, &p.name, top));
         }
-        state[i] = 1;
-        for f in &ctx.structs[i].fields {
-            if let Ty::Struct(j, _) = f.ty {
-                visit(ctx, j, state)?;
-            }
-        }
-        state[i] = 2;
-        Ok(())
-    }
-    let mut state = vec![0u8; ctx.structs.len()];
-    for i in 0..ctx.structs.len() {
-        visit(ctx, i, &mut state)?;
     }
     Ok(())
 }
 
 fn top_name_conflict(span: Span, name: &str, top: TopName) -> Diag {
     let what = match top {
-        TopName::Func(_) => "関数",
+        TopName::Func(_) | TopName::GenericFunc(_) => "関数",
         TopName::Global(_) => "グローバル変数",
-        TopName::Struct(_) => "構造体",
+        TopName::Struct(_) | TopName::GenericStruct(_) => "構造体",
     };
     Diag::new(
         span,
@@ -642,7 +1013,7 @@ impl<'p> Ctx<'p> {
         }
         self.globals[i].state = GlobalState::Busy;
         let ty = self.globals[i].ty.clone();
-        let mut l = FnLower::new(self, module, None, true);
+        let mut l = FnLower::new(self, module, None, Mode::Const, Vec::new());
         let (op, vt) = l.expr(&decl.init, Some(&ty))?;
         if !assignable(&ty, &vt) {
             return Err(mismatch(decl.init.span, &ty, &vt));
@@ -666,6 +1037,17 @@ impl<'p> Ctx<'p> {
 
 // ---------------- 関数の中 ----------------
 
+/// 何のために変換しているか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// 普通の関数（と、展開したジェネリクスの関数）。
+    Normal,
+    /// グローバル変数の初期値（コンパイル時に計算する）。
+    Const,
+    /// ジェネリクスの関数を、型引数を中身のわからない型にして確かめる（出したものは使わない）。
+    Check,
+}
+
 struct Local {
     name: String,
     var: u32,
@@ -678,8 +1060,9 @@ struct FnLower<'c, 'p> {
     module: usize,
     /// 関数の戻り値の型。`None` は `nothing`。
     ret: Option<Ty>,
-    /// グローバル変数の初期値を計算しているところか。
-    const_ctx: bool,
+    mode: Mode,
+    /// ジェネリクスの型引数と、その型。
+    tparams: TParams,
     insts: Vec<Inst>,
     ntemps: u32,
     nvars: u32,
@@ -695,12 +1078,60 @@ struct FnLower<'c, 'p> {
     reachable: bool,
 }
 
-fn lower_func(ctx: &mut Ctx, module: usize, index: usize, f: &Func) -> Result<ir::Function, Diag> {
-    let sig = ctx.funcs[index].clone();
-    let mut l = FnLower::new(ctx, module, sig.ret.clone(), false);
+fn lower_func(ctx: &mut Ctx, index: usize) -> Result<ir::Function, Diag> {
+    let (ast, module, tparams, sig) = {
+        let f = &ctx.funcs[index];
+        (f.ast, f.module, f.tparams.clone(), f.sig.clone())
+    };
+    let l = lower_body(
+        ctx,
+        module,
+        ast,
+        &sig.params,
+        sig.ret.clone(),
+        Mode::Normal,
+        tparams,
+    )?;
+    Ok(ir::Function {
+        name: sig.name,
+        symbol: sig.symbol,
+        returns_value: sig.ret.is_some(),
+        nparams: sig.params.len() as u32,
+        insts: l.0,
+        ntemps: l.1,
+        nvars: l.2,
+    })
+}
+
+/// ジェネリクスの関数を、型引数を中身のわからない型にして確かめる。
+fn check_generic_func(ctx: &mut Ctx, g: usize) -> Result<(), Diag> {
+    let gf = &ctx.generic_funcs[g];
+    let (ast, module, params, ret) = (gf.ast, gf.module, gf.params.clone(), gf.ret.clone());
+    let tp: TParams = ast
+        .type_params
+        .iter()
+        .cloned()
+        .zip(opaque_params(&ast.type_params))
+        .collect();
+    lower_body(ctx, module, ast, &params, ret, Mode::Check, tp)?;
+    Ok(())
+}
+
+/// 関数の中身を変換する。（命令, 一時変数の数, 変数の数）
+fn lower_body(
+    ctx: &mut Ctx,
+    module: usize,
+    f: &Func,
+    params: &[Ty],
+    ret: Option<Ty>,
+    mode: Mode,
+    tparams: TParams,
+) -> Result<(Vec<Inst>, u32, u32), Diag> {
+    let returns = ret.is_some();
+    let mut l = FnLower::new(ctx, module, ret, mode, tparams);
     collect_decls(&f.body, &mut l.declared_somewhere);
     l.scopes.push(Vec::new());
-    for (p, ty) in f.params.iter().zip(&sig.params) {
+    for (p, ty) in f.params.iter().zip(params) {
         let var = l.new_var();
         l.scopes[0].push(Local {
             name: p.name.clone(),
@@ -709,7 +1140,7 @@ fn lower_func(ctx: &mut Ctx, module: usize, index: usize, f: &Func) -> Result<ir
         });
     }
     l.block(&f.body)?;
-    if sig.ret.is_some() {
+    if returns {
         if !block_returns(&f.body) {
             return Err(Diag::new(
                 f.body.close,
@@ -720,15 +1151,7 @@ fn lower_func(ctx: &mut Ctx, module: usize, index: usize, f: &Func) -> Result<ir
     } else {
         l.insts.push(Inst::Ret(None));
     }
-    Ok(ir::Function {
-        name: f.name.clone(),
-        symbol: sig.symbol,
-        returns_value: sig.ret.is_some(),
-        nparams: sig.params.len() as u32,
-        insts: l.insts,
-        ntemps: l.ntemps,
-        nvars: l.nvars,
-    })
+    Ok((l.insts, l.ntemps, l.nvars))
 }
 
 fn collect_decls(b: &Block, out: &mut HashSet<String>) {
@@ -845,6 +1268,11 @@ fn is_logic(op: BinOp) -> bool {
     )
 }
 
+const MAYBE_HINT: &str = "null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます。確かめられるのはローカル変数と引数だけなので、フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから確かめます";
+
+const PARAM_HINT: &str =
+    "型引数（T など）の値にできるのは、代入、引数として渡す、return だけです。計算や比較が必要なら、その関数を引数で受け取ります（例：less:function:bool(T, T)）";
+
 fn mismatch(span: Span, want: &Ty, got: &Ty) -> Diag {
     let d = Diag::new(
         span,
@@ -866,23 +1294,23 @@ fn mismatch(span: Span, want: &Ty, got: &Ty) -> Diag {
             a.name()
         )),
         (Ty::Dec, Ty::Int(_)) => d.hint("型の違う数は混ぜられません。`to:decnum(…)` で変換してください"),
+        (Ty::Func(..), Ty::Func(..)) => d.hint("関数の引数と戻り値の型が、すべて同じでなければなりません"),
         _ => d,
     }
 }
-
-const MAYBE_HINT: &str = "null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます。確かめられるのはローカル変数と引数だけなので、フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから確かめます";
 
 fn maybe_hint(d: Diag) -> Diag {
     d.hint(MAYBE_HINT)
 }
 
 impl<'c, 'p> FnLower<'c, 'p> {
-    fn new(ctx: &'c mut Ctx<'p>, module: usize, ret: Option<Ty>, const_ctx: bool) -> Self {
+    fn new(ctx: &'c mut Ctx<'p>, module: usize, ret: Option<Ty>, mode: Mode, tparams: TParams) -> Self {
         FnLower {
             ctx,
             module,
             ret,
-            const_ctx,
+            mode,
+            tparams,
             insts: Vec::new(),
             ntemps: 0,
             nvars: 0,
@@ -893,6 +1321,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
             narrowed: HashSet::new(),
             reachable: true,
         }
+    }
+
+    fn const_ctx(&self) -> bool {
+        self.mode == Mode::Const
     }
 
     fn temp(&mut self) -> u32 {
@@ -918,13 +1350,18 @@ impl<'c, 'p> FnLower<'c, 'p> {
         self.ctx.top(self.module, name)
     }
 
+    fn resolve_type(&mut self, t: &TypeExpr) -> Result<Ty, Diag> {
+        let tp = self.tparams.clone();
+        self.ctx.resolve_type(self.module, t, &tp)
+    }
+
     fn is_namespace(&self, name: &str) -> bool {
         self.lookup(name).is_none() && self.ctx.mods[self.module].imports.contains_key(name)
     }
 
     /// ランタイムの関数を呼ぶ。グローバル変数の初期値では呼べない。
     fn rt(&mut self, func: Rt, args: Vec<Operand>, span: Span, returns: bool) -> Result<Option<u32>, Diag> {
-        if self.const_ctx {
+        if self.const_ctx() {
             return Err(Diag::new(
                 span,
                 "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
@@ -1067,7 +1504,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diag> {
         match &s.kind {
             StmtKind::Decl(d) => {
-                let ty = self.ctx.resolve_type(self.module, &d.ty)?;
+                let ty = self.resolve_type(&d.ty)?;
                 // 初期値の中では、まだ自分自身は使えない。
                 let (v, vt) = self.expr_to(&d.init, &ty)?;
                 let var = self.declare(&d.name, d.name_span, ty.clone())?;
@@ -1153,13 +1590,13 @@ impl<'c, 'p> FnLower<'c, 'p> {
                             let (p, t) = self.global_place(i, target.span, name)?;
                             (p, t, None)
                         }
-                        Some(TopName::Func(_)) => {
+                        Some(TopName::Func(_) | TopName::GenericFunc(_)) => {
                             return Err(Diag::new(
                                 target.span,
                                 format!("`{}` は関数なので、代入できません", name),
                             ))
                         }
-                        Some(TopName::Struct(_)) => {
+                        Some(TopName::Struct(_) | TopName::GenericStruct(_)) => {
                             return Err(Diag::new(
                                 target.span,
                                 format!("`{}` は構造体なので、代入できません", name),
@@ -1173,7 +1610,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 if let ExprKind::Var(ns) = &obj.kind {
                     if self.is_namespace(ns) {
                         let (p, t) = match self.ctx.member(self.module, ns, f, target.span)? {
-                            Member::Global(i) => {
+                            Target::Top(TopName::Global(i)) => {
                                 self.global_place(i, target.span, &format!("{}.{}", ns, f))?
                             }
                             _ => {
@@ -1336,6 +1773,42 @@ impl<'c, 'p> FnLower<'c, 'p> {
         Ok(self.expr_to(e, ty)?.0)
     }
 
+    /// 呼び出す関数の名前が指すもの（`f`、`ns.f`）。ローカル変数なら `None`。
+    fn callee_target(&self, callee: &Expr) -> Option<(Target, String)> {
+        match &callee.kind {
+            ExprKind::Var(name) if self.lookup(name).is_none() => {
+                self.top(name).map(|t| (Target::Top(t), name.clone()))
+            }
+            ExprKind::Field(obj, f) => match &obj.kind {
+                ExprKind::Var(ns) if self.is_namespace(ns) => self
+                    .ctx
+                    .member(self.module, ns, f, callee.span)
+                    .ok()
+                    .map(|t| (t, format!("{}.{}", ns, f))),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// ジェネリクスの関数を呼んだときの戻り値の型を、引数から調べる（展開はしない）。
+    fn peek_generic_ret(&self, g: usize, explicit: Option<Vec<Ty>>, args: &[Expr]) -> Option<Ty> {
+        let gf = &self.ctx.generic_funcs[g];
+        let bind: Vec<Ty> = match explicit {
+            Some(b) => b,
+            None => {
+                let mut bind = vec![None; gf.ast.type_params.len()];
+                for (arg, t) in args.iter().zip(&gf.params) {
+                    if let Some(at) = self.peek(arg) {
+                        unify(self.ctx, t, &at, &mut bind);
+                    }
+                }
+                bind.into_iter().collect::<Option<Vec<_>>>()?
+            }
+        };
+        subst(self.ctx, gf.ret.as_ref()?, &bind)
+    }
+
     /// 式の型を、計算せずに調べる。整数リテラルだけの式など、文脈で決まるものは `None`。
     fn peek(&self, e: &Expr) -> Option<Ty> {
         match &e.kind {
@@ -1348,8 +1821,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 if let Some(l) = self.lookup(name) {
                     return Some(self.local_type(l));
                 }
-                match self.top(name) {
-                    Some(TopName::Global(i)) => Some(self.ctx.globals[i].ty.clone()),
+                match self.top(name)? {
+                    TopName::Global(i) => Some(self.ctx.globals[i].ty.clone()),
+                    TopName::Func(i) => Some(self.ctx.funcs[i].sig.ty()),
                     _ => None,
                 }
             }
@@ -1361,38 +1835,51 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     self.peek(a).or_else(|| self.peek(b))
                 }
             }
-            ExprKind::Call(callee, _) => match &callee.kind {
-                ExprKind::Var(name) if self.lookup(name).is_none() => match name.as_str() {
-                    "length" => Some(I32),
-                    "bytes" => Some(Ty::Pointer(Box::new(Ty::Int(IntTy::U8)))),
-                    _ => match self.top(name) {
-                        Some(TopName::Func(i)) => self.ctx.funcs[i].ret.clone(),
-                        Some(TopName::Struct(i)) => Some(self.ctx.struct_ty(i)),
-                        _ => None,
-                    },
-                },
-                ExprKind::Field(obj, f) => match &obj.kind {
-                    ExprKind::Var(ns) if self.is_namespace(ns) => {
-                        match self.ctx.member(self.module, ns, f, e.span) {
-                            Ok(Member::Stdio) => match f.as_str() {
-                                "read_line" | "read_file" => Some(Ty::Maybe(Box::new(Ty::Str))),
-                                "write_file" => Some(Ty::Bool),
-                                "last_error" => Some(Ty::Str),
-                                _ => None,
-                            },
-                            Ok(Member::Func(i)) => self.ctx.funcs[i].ret.clone(),
-                            Ok(Member::Struct(i)) => Some(self.ctx.struct_ty(i)),
-                            _ => None,
+            ExprKind::Call(callee, args) => {
+                if let ExprKind::Var(name) = &callee.kind {
+                    if self.lookup(name).is_none() {
+                        match name.as_str() {
+                            "length" => return Some(I32),
+                            "bytes" => return Some(Ty::Pointer(Box::new(Ty::Int(IntTy::U8)))),
+                            "copy" => return args.first().and_then(|a| self.peek(a)),
+                            _ => {}
                         }
                     }
-                    _ => None,
-                },
-                _ => None,
-            },
+                }
+                if let ExprKind::Field(obj, f) = &callee.kind {
+                    if let ExprKind::Var(ns) = &obj.kind {
+                        if self.is_namespace(ns) {
+                            if let Ok(Target::Stdio) = self.ctx.member(self.module, ns, f, e.span) {
+                                return match f.as_str() {
+                                    "read_line" | "read_file" => Some(Ty::Maybe(Box::new(Ty::Str))),
+                                    "write_file" => Some(Ty::Bool),
+                                    "last_error" => Some(Ty::Str),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                }
+                if let ExprKind::Generic(..) = &callee.kind {
+                    // 型を書いたジェネリクスの呼び出しは、型を展開しないとわからないので調べない。
+                    return None;
+                }
+                match self.callee_target(callee) {
+                    Some((Target::Top(TopName::Func(i)), _)) => self.ctx.funcs[i].sig.ret.clone(),
+                    Some((Target::Top(TopName::Struct(i)), _)) => Some(self.ctx.struct_ty(i)),
+                    Some((Target::Top(TopName::GenericFunc(g)), _)) => self.peek_generic_ret(g, None, args),
+                    Some(_) => None,
+                    None => match self.peek(callee)? {
+                        Ty::Func(ret, _) => ret.map(|t| *t),
+                        _ => None,
+                    },
+                }
+            }
             ExprKind::Field(obj, f) => match &obj.kind {
                 ExprKind::Var(ns) if self.is_namespace(ns) => {
                     match self.ctx.member(self.module, ns, f, e.span) {
-                        Ok(Member::Global(i)) => Some(self.ctx.globals[i].ty.clone()),
+                        Ok(Target::Top(TopName::Global(i))) => Some(self.ctx.globals[i].ty.clone()),
+                        Ok(Target::Top(TopName::Func(i))) => Some(self.ctx.funcs[i].sig.ty()),
                         _ => None,
                     }
                 }
@@ -1410,7 +1897,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 _ => None,
             },
             ExprKind::Convert(t, x) => {
-                let to = self.ctx.resolve_type(self.module, t).ok()?;
+                // 型の名前を調べるだけ（ジェネリクスの構造体は展開済みのものだけ）。
+                let to = self.peek_type(t)?;
                 // 文字列から数への変換は、失敗することがあるので maybe になる。
                 if to.is_numeric() && to != Ty::Address && self.peek(x) == Some(Ty::Str) {
                     Some(Ty::Maybe(Box::new(to)))
@@ -1426,6 +1914,21 @@ impl<'c, 'p> FnLower<'c, 'p> {
         }
     }
 
+    /// 型を、展開をしないで調べる（`peek` 用。基本の型だけ）。
+    fn peek_type(&self, t: &TypeExpr) -> Option<Ty> {
+        match t.atoms.as_slice() {
+            [a] => match &a.kind {
+                AtomKind::Int(it) => Some(Ty::Int(*it)),
+                AtomKind::Bool => Some(Ty::Bool),
+                AtomKind::Decnum => Some(Ty::Dec),
+                AtomKind::String => Some(Ty::Str),
+                AtomKind::Address => Some(Ty::Address),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// 式を計算する。`want` は文脈から期待される型（整数リテラルの型などを決めるのに使う）。
     fn expr(&mut self, e: &Expr, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
         match &e.kind {
@@ -1435,7 +1938,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Bool(b) => Ok((Operand::Imm(*b as i64), Ty::Bool)),
             ExprKind::Str(s) => Ok((Operand::Str(self.ctx.intern(s)), Ty::Str)),
             ExprKind::Null => Ok((Operand::Imm(0), Ty::Null)),
-            ExprKind::Var(name) => self.var(e.span, name),
+            ExprKind::Var(name) => self.var(e.span, name, want),
             ExprKind::Unary(UnOp::Neg, inner) => {
                 // `-2147483648` は、2147483648 が 32 に入らなくても書けるようにする。
                 match inner.kind {
@@ -1451,10 +1954,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
                 let Some(it) = t.int_like() else {
                     let d = Diag::new(e.span, format!("符号の `-` は `{}` には使えません", t.name()));
-                    return Err(if t == Ty::Bool {
-                        d.hint("真と偽を入れ替えるなら `not` を使います")
-                    } else {
-                        d
+                    return Err(match t {
+                        Ty::Bool => d.hint("真と偽を入れ替えるなら `not` を使います"),
+                        Ty::Param(..) => d.hint(PARAM_HINT),
+                        _ => d,
                     });
                 };
                 self.emit(Inst::Neg {
@@ -1472,13 +1975,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     (Ty::Bool, _) => self.emit(Inst::BoolNot { dst, a }),
                     (_, Some(it)) => self.emit(Inst::Not { dst, ty: it, a }),
                     _ => {
-                        return Err(Diag::new(
+                        let d = Diag::new(
                             e.span,
                             format!(
                                 "`not` は `bool` と整数にだけ使えますが、この式は `{}` 型です",
                                 t.name()
                             ),
-                        ))
+                        );
+                        return Err(if t.contains_param() { d.hint(PARAM_HINT) } else { d });
                     }
                 }
                 Ok((Operand::Temp(dst), t))
@@ -1514,19 +2018,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ExprKind::Field(obj, f) => {
                 if let ExprKind::Var(ns) = &obj.kind {
                     if self.is_namespace(ns) {
+                        let shown = format!("{}.{}", ns, f);
                         return match self.ctx.member(self.module, ns, f, e.span)? {
-                            Member::Global(i) => self.global_read(i, e.span, &format!("{}.{}", ns, f)),
-                            Member::Func(_) => {
-                                Err(not_yet(e.span, "関数を値として使うこと（関数ポインタ）", 7))
-                            }
-                            Member::Struct(_) => Err(Diag::new(
-                                e.span,
-                                format!(
-                                    "`{}.{}` は構造体です。作るなら `{}.{}(…)` と書きます",
-                                    ns, f, ns, f
-                                ),
-                            )),
-                            Member::Stdio => Err(Diag::new(
+                            Target::Top(top) => self.top_value(e.span, top, &shown, want),
+                            Target::Stdio => Err(Diag::new(
                                 e.span,
                                 "名前空間の関数は、`stdio.print(…)` のように呼び出しの形で使います",
                             )),
@@ -1542,14 +2037,128 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 });
                 Ok((Operand::Temp(dst), fty))
             }
+            ExprKind::Generic(inner, types) => {
+                // `less:32` のように型を書いた関数は、値（関数ポインタ）として使える。
+                let Some((target, shown)) = self.callee_target(inner) else {
+                    return Err(Diag::new(
+                        e.span,
+                        "型を付けられるのは、ジェネリクスの関数と構造体の名前だけです",
+                    ));
+                };
+                match target {
+                    Target::Top(TopName::GenericFunc(g)) => {
+                        let n = self.ctx.generic_funcs[g].ast.type_params.len();
+                        let args = self.type_args(types, n, &shown)?;
+                        self.generic_func_value(e.span, g, args)
+                    }
+                    Target::Top(TopName::GenericStruct(_)) => Err(Diag::new(
+                        e.span,
+                        format!(
+                            "`{}` は構造体です。作るなら `{}:…(…)` のように値を渡します",
+                            shown, shown
+                        ),
+                    )),
+                    _ => Err(Diag::new(
+                        e.span,
+                        format!("`{}` はジェネリクスではないので、型は付けられません", shown),
+                    )),
+                }
+            }
             ExprKind::Convert(ty, x) => self.convert(e, ty, x),
             ExprKind::SizeOf(ty) => {
-                let t = self.ctx.resolve_type(self.module, ty)?;
+                let t = self.resolve_type(ty)?;
                 // 構造体の変数や pointer:構造体 の要素に入るのはアドレスなので、構造体も 8 バイト。
                 int_literal(t.width().bytes() as u64, false, want, e.span)
             }
             ExprKind::ArrayLit(elems) => self.array_lit(e, elems, want),
             ExprKind::ArrayNew(n) => self.array_new(e, n, want),
+        }
+    }
+
+    /// 型引数を `n` 個読む（`get:32:string` の `32:string`）。
+    fn type_args(&mut self, types: &TypeExpr, n: usize, shown: &str) -> Result<Vec<Ty>, Diag> {
+        let tp = self.tparams.clone();
+        let mut pos = 0;
+        let mut args = Vec::new();
+        for _ in 0..n {
+            if pos >= types.atoms.len() {
+                return Err(Diag::new(
+                    types.span,
+                    format!("`{}` には型を {} つ付けます", shown, n),
+                ));
+            }
+            args.push(self.ctx.resolve_atoms(self.module, &types.atoms, &mut pos, &tp)?);
+        }
+        if pos < types.atoms.len() {
+            return Err(Diag::new(
+                types.atoms[pos].span,
+                format!("`{}` に付ける型は {} つです", shown, n),
+            ));
+        }
+        Ok(args)
+    }
+
+    /// ジェネリクスの関数を、型を決めて値（関数ポインタ）にする。
+    fn generic_func_value(&mut self, span: Span, g: usize, args: Vec<Ty>) -> Result<(Operand, Ty), Diag> {
+        if self.mode == Mode::Check || args.iter().any(Ty::contains_param) {
+            // 確かめるだけのときは展開しない（型だけ求める）。
+            let gf = &self.ctx.generic_funcs[g];
+            let (ret, params) = (gf.ret.clone(), gf.params.clone());
+            let ret = ret.map(|r| subst(self.ctx, &r, &args)).unwrap_or(None);
+            let params = params
+                .iter()
+                .map(|p| subst(self.ctx, p, &args))
+                .collect::<Option<Vec<_>>>();
+            let ty = Ty::Func(ret.map(Box::new), params.unwrap_or_default());
+            return Ok((Operand::Imm(0), ty));
+        }
+        let i = self.ctx.instantiate_func(g, args, span)?;
+        Ok((Operand::Func(i as u32), self.ctx.funcs[i].sig.ty()))
+    }
+
+    /// 名前（関数・グローバル変数・構造体）を値として使う。
+    fn top_value(
+        &mut self,
+        span: Span,
+        top: TopName,
+        name: &str,
+        want: Option<&Ty>,
+    ) -> Result<(Operand, Ty), Diag> {
+        match top {
+            TopName::Global(i) => self.global_read(i, span, name),
+            TopName::Func(i) => {
+                if self.const_ctx() {
+                    return Err(Diag::new(span, "グローバル変数の初期値に、関数は使えません"));
+                }
+                Ok((Operand::Func(i as u32), self.ctx.funcs[i].sig.ty()))
+            }
+            TopName::GenericFunc(g) => {
+                // 入れる先の関数の型から、型引数を決める。
+                let template = {
+                    let gf = &self.ctx.generic_funcs[g];
+                    Ty::Func(gf.ret.clone().map(Box::new), gf.params.clone())
+                };
+                let n = self.ctx.generic_funcs[g].ast.type_params.len();
+                let mut bind = vec![None; n];
+                if let Some(w @ Ty::Func(..)) = want.map(|w| match w {
+                    Ty::Maybe(inner) => &**inner,
+                    w => w,
+                }) {
+                    unify(self.ctx, &template, w, &mut bind);
+                }
+                let Some(args) = bind.into_iter().collect::<Option<Vec<_>>>() else {
+                    return Err(Diag::new(
+                        span,
+                        format!("ジェネリクスの関数 `{}` の型引数が決まりません", name),
+                    )
+                    .hint(format!("`{}:32` のように型を書きます", name)));
+                };
+                self.generic_func_value(span, g, args)
+            }
+            TopName::Struct(_) | TopName::GenericStruct(_) => Err(Diag::new(
+                span,
+                format!("`{}` は構造体の名前です。作るなら `{}(…)` と書きます", name, name),
+            )),
         }
     }
 
@@ -1564,7 +2173,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 // 箱に入った値は、グローバル変数の場所から読む。
                 ConstVal::Boxed(_) => {}
             }
-        } else if self.const_ctx {
+        } else if self.const_ctx() {
             return Err(Diag::new(
                 span,
                 format!(
@@ -1574,7 +2183,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             )
             .hint(format!("`{}` に `immutable` を付けると使えます", name)));
         }
-        if self.const_ctx {
+        if self.const_ctx() {
             return Err(Diag::new(
                 span,
                 "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
@@ -1589,7 +2198,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         Ok((Operand::Temp(dst), ty))
     }
 
-    fn var(&mut self, span: Span, name: &str) -> Result<(Operand, Ty), Diag> {
+    fn var(&mut self, span: Span, name: &str, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
         if let Some(l) = self.lookup(name) {
             let (var, declared, ty) = (l.var, l.ty.clone(), self.local_type(l));
             let dst = self.temp();
@@ -1610,12 +2219,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             return Ok((Operand::Temp(dst), ty));
         }
         match self.top(name) {
-            Some(TopName::Global(i)) => self.global_read(i, span, name),
-            Some(TopName::Func(_)) => Err(not_yet(span, "関数を値として使うこと（関数ポインタ）", 7)),
-            Some(TopName::Struct(_)) => Err(Diag::new(
-                span,
-                format!("`{}` は構造体の名前です。作るなら `{}(…)` と書きます", name, name),
-            )),
+            Some(top) => self.top_value(span, top, name, want),
             None if self.ctx.mods[self.module].imports.contains_key(name) => Err(Diag::new(
                 span,
                 format!("`{}` は名前空間です。`{}.名前` のように使います", name, name),
@@ -1817,6 +2421,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ty::Bool => d.hint("真偽の演算には `and`・`or`・`not` などを使います"),
                 Ty::Str => d.hint("文字列でできるのは `+`（連結）と `==`・`!=` だけです"),
                 Ty::Maybe(_) => maybe_hint(d),
+                t if t.contains_param() => d.hint(PARAM_HINT),
                 _ => d,
             });
         };
@@ -1910,6 +2515,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
             (Some(x), Some(y)) if x != y && assignable(y, x) => y.clone(),
             _ => pa.or(pb).unwrap_or(I32),
         };
+        if t.contains_param() {
+            return Err(Diag::new(e.span, format!("`{}` 型の値は比べられません", t.name())).hint(PARAM_HINT));
+        }
         if let Ty::Maybe(inner) = &t {
             if inner.needs_box() {
                 return Err(maybe_hint(Diag::new(
@@ -1942,7 +2550,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         b: bv,
                     });
                 } else {
-                    // array・pointer・構造体は、同じものを指しているかを比べる。
+                    // array・pointer・構造体・関数は、同じものを指しているかを比べる。
                     self.emit(Inst::Cmp {
                         dst,
                         op: cop,
@@ -1998,7 +2606,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         }
         let negate = matches!(op, BinOp::Nand | BinOp::Nor);
         let is_and = matches!(op, BinOp::And | BinOp::Nand);
-        if self.const_ctx {
+        if self.const_ctx() {
             // 初期値の計算では副作用がないので、両辺を計算してよい。
             let bv = self.expr_as(b, &Ty::Bool)?;
             let dst = self.temp();
@@ -2080,63 +2688,243 @@ impl<'c, 'p> FnLower<'c, 'p> {
         args: &[Expr],
         want: Option<&Ty>,
     ) -> Result<Option<(Operand, Ty)>, Diag> {
-        let name = match &callee.kind {
-            ExprKind::Var(n) => n,
-            ExprKind::Field(obj, f) => {
-                if let ExprKind::Var(ns) = &obj.kind {
-                    if self.is_namespace(ns) {
-                        return match self.ctx.member(self.module, ns, f, callee.span)? {
-                            Member::Stdio => self.stdio_call(e, ns, f, args),
-                            Member::Func(i) => self.call_func(e, i, args),
-                            Member::Struct(i) => self.construct(e, i, args).map(Some),
-                            Member::Global(_) => Err(Diag::new(
-                                callee.span,
-                                format!("`{}.{}` はグローバル変数なので、呼べません", ns, f),
-                            )),
-                        };
-                    }
-                }
-                return Err(not_yet(callee.span, "フィールドに入った関数の呼び出し", 7));
+        if let ExprKind::Var(name) = &callee.kind {
+            if self.lookup(name).is_none() && BUILTINS.contains(&name.as_str()) {
+                return self.builtin_call(e, name, args, want);
             }
-            _ => return Err(not_yet(callee.span, "この形の関数呼び出し", 7)),
-        };
-        if self.lookup(name).is_some() {
-            return Err(not_yet(
-                callee.span,
-                "変数に入った関数の呼び出し（関数ポインタ）",
-                7,
-            ));
-        }
-        if BUILTINS.contains(&name.as_str()) {
-            return self.builtin_call(e, name, args, want);
-        }
-        match self.top(name) {
-            Some(TopName::Func(i)) => self.call_func(e, i, args),
-            Some(TopName::Struct(i)) => self.construct(e, i, args).map(Some),
-            Some(TopName::Global(_)) => Err(Diag::new(
-                callee.span,
-                format!("`{}` はグローバル変数なので、呼べません", name),
-            )),
-            None => {
+            if self.lookup(name).is_none() && self.top(name).is_none() && !self.is_namespace(name) {
                 let d = Diag::new(callee.span, format!("`{}` という関数はありません", name));
-                Err(if name == "print" || name == "put" {
+                return Err(if name == "print" || name == "put" {
                     d.hint(format!(
                         "表示は `import stdio;` を書いて、`stdio.{}(…)` で行います",
                         name
                     ))
                 } else {
                     d
-                })
+                });
             }
+        }
+        // `get:32(…)`、`List:32(…)`
+        if let ExprKind::Generic(inner, types) = &callee.kind {
+            let Some((target, shown)) = self.callee_target(inner) else {
+                return Err(Diag::new(
+                    callee.span,
+                    "型を付けられるのは、ジェネリクスの関数と構造体の名前だけです",
+                ));
+            };
+            return match target {
+                Target::Top(TopName::GenericFunc(g)) => {
+                    let n = self.ctx.generic_funcs[g].ast.type_params.len();
+                    let targs = self.type_args(types, n, &shown)?;
+                    self.call_generic(e, g, targs, args)
+                }
+                Target::Top(TopName::GenericStruct(g)) => {
+                    let n = self.ctx.generic_structs[g].def.type_params.len();
+                    let targs = self.type_args(types, n, &shown)?;
+                    let i = self.ctx.instantiate_struct(g, targs, callee.span)?;
+                    self.construct(e, i, args).map(Some)
+                }
+                _ => Err(Diag::new(
+                    callee.span,
+                    format!("`{}` はジェネリクスではないので、型は付けられません", shown),
+                )),
+            };
+        }
+        match self.callee_target(callee) {
+            Some((Target::Stdio, _)) => {
+                let ExprKind::Field(obj, f) = &callee.kind else {
+                    unreachable!("stdio は ns.name の形")
+                };
+                let ExprKind::Var(ns) = &obj.kind else {
+                    unreachable!("stdio は ns.name の形")
+                };
+                self.stdio_call(e, ns, f, args)
+            }
+            Some((Target::Top(TopName::Func(i)), _)) => self.call_func(e, i, args),
+            Some((Target::Top(TopName::GenericFunc(g)), shown)) => {
+                let targs = self.infer_type_args(e, g, args, &shown, want)?;
+                self.call_generic(e, g, targs, args)
+            }
+            Some((Target::Top(TopName::Struct(i)), _)) => self.construct(e, i, args).map(Some),
+            Some((Target::Top(TopName::GenericStruct(g)), shown)) => {
+                let n = self.ctx.generic_structs[g].def.type_params.len();
+                let example: Vec<&str> = vec!["32"; n];
+                Err(Diag::new(
+                    callee.span,
+                    format!("構造体 `{}` を作るときは、型を書きます", shown),
+                )
+                .hint(format!("例：{}:{}(…)", shown, example.join(":"))))
+            }
+            // グローバル変数・ローカル変数・フィールドなどに入った関数（関数ポインタ）
+            Some((Target::Top(TopName::Global(_)), _)) | None => self.call_indirect(e, callee, args),
         }
     }
 
+    /// 変数などに入った関数（関数ポインタ）を呼ぶ。
+    fn call_indirect(
+        &mut self,
+        e: &Expr,
+        callee: &Expr,
+        args: &[Expr],
+    ) -> Result<Option<(Operand, Ty)>, Diag> {
+        if self.const_ctx() {
+            return Err(Diag::new(e.span, "グローバル変数の初期値では、関数を呼べません"));
+        }
+        let (fv, ft) = self.expr(callee, None)?;
+        let (ret, params) = match ft {
+            Ty::Func(ret, params) => (ret.map(|t| *t), params),
+            Ty::Maybe(inner) if matches!(*inner, Ty::Func(..)) => {
+                return Err(maybe_hint(Diag::new(
+                    callee.span,
+                    format!(
+                        "`maybe:{}` 型の関数は、null でないことを確かめてから呼びます",
+                        inner.name()
+                    ),
+                )))
+            }
+            t => {
+                return Err(Diag::new(
+                    callee.span,
+                    format!("関数ではないので呼べません（この式は `{}` 型です）", t.name()),
+                ))
+            }
+        };
+        if args.len() != params.len() {
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "この関数の引数は {} 個ですが、{} 個書かれています",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut ops = Vec::new();
+        for (arg, ty) in args.iter().zip(&params) {
+            ops.push(self.expr_as(arg, ty)?);
+        }
+        let dst = ret.as_ref().map(|_| self.temp());
+        self.emit(Inst::CallIndirect {
+            dst,
+            target: fv,
+            args: ops,
+        });
+        Ok(ret.map(|t| (Operand::Temp(dst.unwrap()), t)))
+    }
+
+    /// ジェネリクスの関数の型引数を、引数の型から決める。
+    fn infer_type_args(
+        &mut self,
+        e: &Expr,
+        g: usize,
+        args: &[Expr],
+        shown: &str,
+        want: Option<&Ty>,
+    ) -> Result<Vec<Ty>, Diag> {
+        let (names, params, ret) = {
+            let gf = &self.ctx.generic_funcs[g];
+            (gf.ast.type_params.clone(), gf.params.clone(), gf.ret.clone())
+        };
+        if args.len() != params.len() {
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "関数 `{}` の引数は {} 個ですが、{} 個書かれています",
+                    shown,
+                    params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut bind = vec![None; names.len()];
+        for (arg, t) in args.iter().zip(&params) {
+            if let Some(at) = self.peek(arg) {
+                unify(self.ctx, t, &at, &mut bind);
+            }
+        }
+        // 戻り値を入れる先の型からも決める（`h:32 = id(4)`）。
+        if let (Some(r), Some(w)) = (&ret, want) {
+            unify(self.ctx, r, w, &mut bind);
+        }
+        // それでも決まらず、引数が整数リテラルなら、整数リテラルの決まりどおり 32 にする。
+        for (arg, t) in args.iter().zip(&params) {
+            if let (Ty::Param(i, _), None) = (t, self.peek(arg)) {
+                if bind[*i as usize].is_none() && is_int_literal(arg) {
+                    bind[*i as usize] = Some(I32);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (b, n) in bind.into_iter().zip(&names) {
+            match b {
+                Some(t) => out.push(t),
+                None => {
+                    let example: Vec<&str> = vec!["32"; names.len()];
+                    return Err(
+                        Diag::new(e.span, format!("型引数 `{}` が、引数から決まりません", n)).hint(format!(
+                            "`{}:{}(…)` のように型を書きます",
+                            shown,
+                            example.join(":")
+                        )),
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// ジェネリクスの関数を、型を決めて呼ぶ。
+    fn call_generic(
+        &mut self,
+        e: &Expr,
+        g: usize,
+        targs: Vec<Ty>,
+        args: &[Expr],
+    ) -> Result<Option<(Operand, Ty)>, Diag> {
+        if self.const_ctx() {
+            return Err(Diag::new(e.span, "グローバル変数の初期値では、関数を呼べません"));
+        }
+        if let Some(bad) = targs.iter().find(|t| **t == Ty::Null) {
+            return Err(Diag::new(
+                e.span,
+                format!("型引数に `{}` は使えません", bad.name()),
+            ));
+        }
+        if self.mode == Mode::Check || targs.iter().any(Ty::contains_param) {
+            // 確かめるだけのときは展開しない。引数と戻り値の型だけ求めて、呼び出しの形を確かめる。
+            let (name, ast, module) = {
+                let gf = &self.ctx.generic_funcs[g];
+                (gf.ast.name.clone(), gf.ast, gf.module)
+            };
+            let tp: TParams = ast.type_params.iter().cloned().zip(targs).collect();
+            let (params, ret) = self.ctx.func_types(module, ast, &tp)?;
+            if args.len() != params.len() {
+                return Err(Diag::new(
+                    e.span,
+                    format!(
+                        "関数 `{}` の引数は {} 個ですが、{} 個書かれています",
+                        name,
+                        params.len(),
+                        args.len()
+                    ),
+                ));
+            }
+            for (arg, ty) in args.iter().zip(&params) {
+                self.expr_as(arg, ty)?;
+            }
+            let dst = ret.as_ref().map(|_| self.temp());
+            return Ok(ret.map(|t| (Operand::Temp(dst.unwrap()), t)));
+        }
+        let i = self.ctx.instantiate_func(g, targs, e.span)?;
+        self.call_func(e, i, args)
+    }
+
     fn call_func(&mut self, e: &Expr, index: usize, args: &[Expr]) -> Result<Option<(Operand, Ty)>, Diag> {
-        if self.const_ctx {
+        if self.const_ctx() {
             return Err(Diag::new(e.span, "グローバル変数の初期値では、関数を呼べません")
                 .hint("初期値には、値がコンパイル時に決まる式だけが書けます"));
         }
-        let sig = self.ctx.funcs[index].clone();
+        let sig = self.ctx.funcs[index].sig.clone();
         if args.len() != sig.params.len() {
             return Err(Diag::new(
                 e.span,
@@ -2163,7 +2951,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     /// `Point(1, 2)`：構造体を作る。
     fn construct(&mut self, e: &Expr, index: usize, args: &[Expr]) -> Result<(Operand, Ty), Diag> {
-        let name = self.ctx.structs[index].def.name.clone();
+        let name = self.ctx.structs[index].name.clone();
         let fields: Vec<(String, Ty, i64)> = self.ctx.structs[index]
             .fields
             .iter()
@@ -2260,7 +3048,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         ))
                     }
                 }
-                if self.const_ctx {
+                if self.const_ctx() {
                     return Err(Diag::new(
                         e.span,
                         "グローバル変数の初期値には、値がコンパイル時に決まる式だけが書けます",
@@ -2410,7 +3198,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     /// `to:型(x)`
     fn convert(&mut self, e: &Expr, ty: &TypeExpr, x: &Expr) -> Result<(Operand, Ty), Diag> {
-        let to = self.ctx.resolve_type(self.module, ty)?;
+        let to = self.resolve_type(ty)?;
         if to == Ty::Str {
             let (v, from) = self.expr(x, None)?;
             let func = match &from {
@@ -2577,7 +3365,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("例：a:array:32 = array(10);"))
             }
         };
-        if let Ty::Struct(..) = elem {
+        if let Ty::Struct(..) | Ty::Func(..) = elem {
             return Err(Diag::new(
                 e.span,
                 format!(
@@ -2586,8 +3374,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 ),
             )
             .hint(format!(
-                "`array:maybe:{}` にするか、`[{}(…), …]` のように作ります",
-                elem.name(),
+                "`array:maybe:{}` にするか、`[…, …]` のように要素を並べて作ります",
                 elem.name()
             )));
         }
@@ -2610,6 +3397,15 @@ impl<'c, 'p> FnLower<'c, 'p> {
             e.span,
         )?;
         Ok((arr, Ty::Array(Box::new(elem))))
+    }
+}
+
+fn is_int_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) => true,
+        ExprKind::Unary(UnOp::Neg, x) => is_int_literal(x),
+        ExprKind::Binary(op, a, b) if !is_comparison(*op) => is_int_literal(a) && is_int_literal(b),
+        _ => false,
     }
 }
 

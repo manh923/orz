@@ -1,0 +1,8 @@
+// error: 型の後ろに、余分な `:…` があります
+struct Box:T {
+    v:T;
+}
+
+function nothing main() {
+    b:Box:32:string = Box:32(1);
+}

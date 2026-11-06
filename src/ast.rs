@@ -5,7 +5,7 @@
 
 use crate::source::Span;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntTy {
     /// `8`：符号なし 8bit
     U8,
@@ -25,26 +25,34 @@ impl IntTy {
     }
 }
 
-/// ソースに書かれた型。
+/// ソースに書かれた型。`Map:string:List:32` のような `:` で区切った並びのまま持つ。
+/// どこで区切るか（`List` が型をいくつ取るか）は、定義を見ないとわからないので、意味解析で決める。
 #[derive(Clone, Debug)]
 pub struct TypeExpr {
-    pub kind: TypeKind,
+    pub atoms: Vec<TypeAtom>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug)]
-pub enum TypeKind {
+pub struct TypeAtom {
+    pub kind: AtomKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum AtomKind {
     Int(IntTy),
     Bool,
     Decnum,
     String,
     Address,
-    Pointer(Box<TypeExpr>),
-    Array(Box<TypeExpr>),
-    Maybe(Box<TypeExpr>),
+    /// 後ろに型を 1 つ取る。
+    Pointer,
+    Array,
+    Maybe,
     /// `function:戻り値の型(引数の型, ...)`
     Function(Box<RetType>, Vec<TypeExpr>),
-    /// 構造体の名前。`util.Point` のように名前空間が付くこともある。
+    /// 構造体か、ジェネリクスの型引数（`T`）。`util.Point` のように名前空間が付くこともある。
     Named(Option<String>, String),
 }
 
@@ -103,6 +111,8 @@ pub struct Func {
     pub body: Block,
     /// `export` が付いているか。
     pub exported: bool,
+    /// ジェネリクスの型引数（`function T get:T(…)` の `T`）。
+    pub type_params: Vec<String>,
 }
 
 /// `struct Point { x:32; y:32; }`
@@ -112,6 +122,8 @@ pub struct StructDef {
     pub name_span: Span,
     pub fields: Vec<FieldDef>,
     pub exported: bool,
+    /// ジェネリクスの型引数（`struct List:T` の `T`）。
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -268,4 +280,6 @@ pub enum ExprKind {
     ArrayLit(Vec<Expr>),
     /// `array(n)`
     ArrayNew(Box<Expr>),
+    /// `get:32`、`List:32` のように型を付けた関数・構造体の名前。
+    Generic(Box<Expr>, TypeExpr),
 }
