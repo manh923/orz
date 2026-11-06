@@ -1,0 +1,94 @@
+// exit: 0
+// arena の中で作ったものどうしなら、関数の中でつないだり入れたりできる。外のものは読める
+import stdio;
+
+struct List:T {
+    items:array:T;
+    count:32;
+}
+
+struct Node {
+    name:string;
+    next:maybe:Node;
+}
+
+struct Holder {
+    list:List:string;
+    note:string;
+}
+
+function List:T new_list:T() {
+    return List:T(array(1), 0);
+}
+
+function nothing push:T(l:List:T, v:T) {
+    if (l.count == length(l.items)) {
+        bigger:array:T = array(l.count * 2);
+        i:32 = 0;
+        while (i < l.count) {
+            bigger[i] = l.items[i];
+            i = i + 1;
+        }
+        l.items = bigger;
+    }
+    l.items[l.count] = v;
+    l.count = l.count + 1;
+}
+
+function nothing insert_after(at:Node, n:Node) {
+    n.next = at.next;
+    at.next = n;
+}
+
+function string shout(s:string) {
+    return s + "!";
+}
+
+function string same(s:string) {
+    return s;
+}
+
+function 32 total(l:List:string) {
+    n:32 = 0;
+    i:32 = 0;
+    while (i < l.count) {
+        n = n + length(l.items[i]);
+        i = i + 1;
+    }
+    return n;
+}
+
+outer_name:string = "外";
+
+function nothing main() {
+    keep:List:string = new_list();
+    push(keep, "残る");
+    sum:32 = 0;
+    i:32 = 0;
+    while (i < 1000) {
+        arena {
+            l:List:string = new_list();
+            j:32 = 0;
+            while (j < 20) {
+                push(l, shout(to:string(j)));
+                j = j + 1;
+            }
+            head:Node = Node("a", null);
+            insert_after(head, Node("b", null));
+            insert_after(head, Node(same(outer_name), null));
+            h:Holder = Holder(keep, outer_name);
+            second:maybe:Node = head.next;
+            if (second != null) {
+                sum = sum + length(second.name);
+            }
+            sum = sum + total(l) + total(h.list);
+            if (i == 999) {
+                stdio.print(l.items[19]);
+                stdio.print(head);
+            }
+        }
+        i = i + 1;
+    }
+    stdio.print(sum);
+    stdio.print(keep.items[0]);
+}

@@ -1,0 +1,9 @@
+// error: arena の中で作った値を return しています
+function string f() {
+    arena {
+        s:string = to:string(5);
+        return s;
+    }
+    return "";
+}
+function nothing main() { f(); }

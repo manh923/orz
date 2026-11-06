@@ -6,6 +6,7 @@
 //!   orz asm ファイル.orz [-o 出力.s]   アセンブリだけ出す（`-o -` なら画面に）
 
 mod ast;
+mod escape;
 mod fold;
 mod ir;
 mod lexer;
@@ -98,6 +99,7 @@ fn compile(path: &Path, no_fold: bool, no_gc: bool) -> String {
     let result = files
         .load_all(path)
         .and_then(|_| sema::lower(&files.progs))
+        .and_then(|ir| escape::check(&ir, &files.srcs).map(|_| ir))
         .and_then(|mut ir| {
             if !no_fold {
                 fold::fold(&mut ir)?;

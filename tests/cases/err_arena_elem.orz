@@ -1,0 +1,7 @@
+// error: arena の中で作った値を、arena の外で作ったもの（構造体・配列など）の中に入れています
+function nothing main() {
+    a:array:string = ["x"];
+    arena {
+        a[0] = to:string(3);
+    }
+}

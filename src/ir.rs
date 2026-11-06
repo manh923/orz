@@ -127,11 +127,6 @@ pub enum Rt {
     ArrayCopy,
     /// GC を今すぐ動かす
     Collect,
-    /// arena に入る・出る（次の変更で使う）
-    #[allow(dead_code)]
-    ArenaPush,
-    #[allow(dead_code)]
-    ArenaPop,
 }
 
 impl Rt {
@@ -157,8 +152,6 @@ impl Rt {
             Rt::Copy => "orz_rt_copy",
             Rt::ArrayCopy => "orz_rt_array_copy",
             Rt::Collect => "orz_rt_collect",
-            Rt::ArenaPush => "orz_rt_arena_push",
-            Rt::ArenaPop => "orz_rt_arena_pop",
         }
     }
 
@@ -218,6 +211,11 @@ pub enum Inst {
     /// `cond` が 0 でなければ `then` へ、0 なら `els` へ。
     Branch { cond: Operand, then: u32, els: u32 },
     Ret(Option<Operand>),
+    /// arena に入る（`arena {`）・出る（`}`）。対になっている。
+    ArenaEnter,
+    ArenaExit,
+    /// break・continue・return で arena の途中から抜けるとき、n 段の arena を返す（対の数えには入れない）。
+    ArenaPop { n: u32 },
 }
 
 #[derive(Debug)]
@@ -232,6 +230,17 @@ pub struct Function {
     pub insts: Vec<Inst>,
     pub ntemps: u32,
     pub nvars: u32,
+    /// 命令ごとの、もとの文の場所（エラーメッセージ用）。
+    pub spans: Vec<Span>,
+    /// 変数が宣言された arena の深さ（arena の外は 0）。
+    pub var_depth: Vec<u32>,
+    /// 一時変数・変数が、どこかで作った値（string・array・構造体など）のアドレスを持つか。
+    pub ptr_temps: Vec<bool>,
+    pub ptr_vars: Vec<bool>,
+    /// 命令ごとの、読み書きする「入れ場所の種類」（構造体のフィールドや、配列の要素）。
+    /// 中に別のもの（構造体・配列など）を入れる場所だけを書く。`Load`・`StoreMem` は 1 つ、
+    /// 構造体や配列の `copy` は、複製する中身のすべて。arena の持ち出しの検査に使う。
+    pub slots: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +277,8 @@ pub struct Program {
     pub main_takes_args: bool,
     /// `main` の前に順に呼ぶ、グローバル変数の初期化の関数（`funcs` の番号）。
     pub init_funcs: Vec<u32>,
+    /// 入れ場所の種類の数（`Function::slots`）。
+    pub nslots: u32,
 }
 
 /// 実行時エラーの理由。コンパイル時と実行時で同じ言い方を使う。

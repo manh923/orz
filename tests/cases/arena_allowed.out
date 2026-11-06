@@ -1,0 +1,4 @@
+19!
+Node(name: "a", next: Node(name: "外", next: Node(name: "b", next: null)))
+59000
+残る

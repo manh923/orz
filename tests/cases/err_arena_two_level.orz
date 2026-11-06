@@ -1,0 +1,10 @@
+// error: （入れているのは err_arena_two_level.orz:3）
+struct P { name:string; }
+function nothing set(p:P, s:string) { p.name = s; }
+function nothing outer_set(p:P) { set(p, "v" + to:string(1)); }
+function nothing main() {
+    p:P = P("x");
+    arena {
+        outer_set(p);
+    }
+}

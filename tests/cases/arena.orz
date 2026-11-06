@@ -1,0 +1,131 @@
+// exit: 0
+// arena の出入り（break・continue・return で途中から抜ける、入れ子、再帰）と、メモリが増えないこと
+import stdio;
+
+struct Tree {
+    value:32;
+    left:maybe:Tree;
+    right:maybe:Tree;
+}
+
+function maybe:Tree build(depth:32) {
+    if (depth == 0) {
+        return null;
+    }
+    return Tree(depth, build(depth - 1), build(depth - 1));
+}
+
+function 32 count(t:maybe:Tree) {
+    if (t == null) {
+        return 0;
+    }
+    return 1 + count(t.left) + count(t.right);
+}
+
+// arena の中から return する
+function 32 first_long(words:array:string, n:32) {
+    i:32 = 0;
+    while (i < length(words)) {
+        arena {
+            s:string = words[i] + words[i];
+            if (length(s) >= n) {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// 呼ぶたびに arena に入る（再帰）
+function 32 nest(n:32) {
+    if (n == 0) {
+        return 0;
+    }
+    r:32 = 0;
+    arena {
+        t:maybe:Tree = build(3);
+        r = count(t) + nest(n - 1);
+    }
+    return r;
+}
+
+function 32 nested_return(n:32) {
+    arena {
+        a:array:32 = array(10);
+        arena {
+            b:array:32 = array(10);
+            arena {
+                if (n > 0) {
+                    return n;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+function nothing main() {
+    total:64 = 0;
+    i:32 = 0;
+    // 毎回 1MB くらい作るが、arena を抜けるたびに返すので、メモリは増えない
+    while (i < 2000) {
+        arena {
+            big:array:64 = array(131072);
+            big[131071] = to:64(i);
+            total = total + big[131071];
+            if (i % 2 == 0) {
+                i = i + 1;
+                continue;
+            }
+            arena {
+                t:maybe:Tree = build(6);
+                total = total + to:64(count(t));
+                if (i == 1999) {
+                    break;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    stdio.print(total);
+    stdio.print(first_long(["a", "bb", "ccc", "dddd"], 6));
+    stdio.print(first_long(["a"], 6));
+    stdio.print(nest(100));
+    // arena の中で GC を動かしても、外のものは消えない
+    keep:array:string = ["外", "の", "文字列"];
+    arena {
+        j:32 = 0;
+        while (j < 100000) {
+            x:string = to:string(j);
+            j = j + 1;
+        }
+        collect();
+        stdio.print(keep[2]);
+    }
+    // 入れ子の arena の中から break・continue
+    k:32 = 0;
+    arena {
+        n:32 = 0;
+        while (n < 1000) {
+            n = n + 1;
+            arena {
+                s:string = to:string(n);
+                arena {
+                    t:string = s + s;
+                    if (n % 3 == 0) {
+                        continue;
+                    }
+                    if (n == 500) {
+                        break;
+                    }
+                }
+                k = k + 1;
+            }
+        }
+        stdio.print(n);
+    }
+    stdio.print(k);
+    stdio.print(nested_return(7));
+    stdio.print(nested_return(0));
+}

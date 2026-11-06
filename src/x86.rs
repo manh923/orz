@@ -365,6 +365,13 @@ impl<'a> Gen<'a> {
                     self.store_temp(*d);
                 }
             }
+            Inst::ArenaEnter => asm!(self, "call orz_rt_arena_push"),
+            Inst::ArenaExit => asm!(self, "call orz_rt_arena_pop"),
+            Inst::ArenaPop { n } => {
+                for _ in 0..*n {
+                    asm!(self, "call orz_rt_arena_pop");
+                }
+            }
             Inst::Ret(v) => {
                 if let Some(v) = v {
                     self.load(*v, "%rax");
@@ -960,7 +967,12 @@ fn each_temp(inst: &Inst, mut f: impl FnMut(u32, bool)) {
         }
         Inst::Branch { cond, .. } => use_op(cond, f),
         Inst::Ret(Some(v)) => use_op(v, f),
-        Inst::Ret(None) | Inst::Label(_) | Inst::Jump(_) => {}
+        Inst::Ret(None)
+        | Inst::Label(_)
+        | Inst::Jump(_)
+        | Inst::ArenaEnter
+        | Inst::ArenaExit
+        | Inst::ArenaPop { .. } => {}
     }
 }
 

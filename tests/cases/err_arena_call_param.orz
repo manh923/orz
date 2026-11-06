@@ -1,0 +1,12 @@
+// error: 関数 `push` に渡した 2 番目の引数（arena の中で作った値）が、1 番目の引数（それより外で作ったもの）の中に入れられます
+struct List { items:array:string; count:32; }
+function nothing push(l:List, v:string) {
+    l.items[l.count] = v;
+    l.count = l.count + 1;
+}
+function nothing main() {
+    l:List = List(array(10), 0);
+    arena {
+        push(l, to:string(7));
+    }
+}

@@ -1,5 +1,6 @@
-// error: `arena`はまだ実装していません（実装の手順 7 で対応）
-function nothing main() {
-    arena {
-    }
+// error: `extern`はまだ実装していません
+extern function 32 abs(x:32);
+
+function 32 main() {
+    return 0;
 }

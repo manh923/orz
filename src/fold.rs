@@ -268,7 +268,12 @@ fn fold_insts(insts: &mut [Inst]) -> Result<HashMap<u32, i64>, Diag> {
                 *v = subst(&known, *v);
                 None
             }
-            Inst::Ret(None) | Inst::Label(_) | Inst::Jump(_) => None,
+            Inst::Ret(None)
+            | Inst::Label(_)
+            | Inst::Jump(_)
+            | Inst::ArenaEnter
+            | Inst::ArenaExit
+            | Inst::ArenaPop { .. } => None,
         };
         match replaced {
             Some(Repl::Const(dst, v)) => {

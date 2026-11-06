@@ -1573,5 +1573,8 @@ __attribute__((noreturn)) void orz_rt_start(long *sp) {
     g_argv = (char **)(sp + 1);
     stack_top = (char *)sp;
     setup_signals();
-    orz_rt_exit(orz_entry());
+    long code = orz_entry();
+    // arena の出入りは対になっているはず（コンパイラの誤りを見つけるため）。
+    if (narenas != 0) orz_rt_panic(0, "（コンパイラの誤り）arena の出入りが合っていません");
+    orz_rt_exit(code);
 }

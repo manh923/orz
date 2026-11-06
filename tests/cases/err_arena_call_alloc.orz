@@ -1,0 +1,12 @@
+// error: 関数 `rename` が中で作る値（ここで呼ぶと arena の中にできます）が、1 番目の引数（それより外で作ったもの）の中に入れられます
+struct P { name:string; }
+function nothing rename(p:P, n:32) {
+    p.name = "名前" + to:string(n);
+}
+function nothing main() {
+    p:P = P("x");
+    rename(p, 1);
+    arena {
+        rename(p, 2);
+    }
+}

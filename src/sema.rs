@@ -96,6 +96,16 @@ impl Ty {
         matches!(self, Ty::Int(_) | Ty::Bool | Ty::Address | Ty::Dec)
     }
 
+    /// どこかで作った値（arena の中で作られうるもの）のアドレスか。arena の持ち出しの検査に使う。
+    /// maybe:32 などの箱は、arena の中でも GC 側に作るので対象外。関数はプログラムの中にあるので対象外。
+    fn has_level(&self) -> bool {
+        match self {
+            Ty::Str | Ty::Array(_) | Ty::Pointer(_) | Ty::Struct(..) | Ty::Address | Ty::Param(..) => true,
+            Ty::Maybe(inner) => !inner.needs_box() && inner.has_level(),
+            _ => false,
+        }
+    }
+
     /// 値の中にポインタがあるか（GC が中を調べる必要があるか）。数と bool だけはない。
     fn has_pointers(&self) -> bool {
         !matches!(self, Ty::Int(_) | Ty::Bool | Ty::Dec)
@@ -136,15 +146,11 @@ fn assignable(to: &Ty, from: &Ty) -> bool {
     to == from || matches!(to, Ty::Maybe(inner) if **inner == *from || *from == Ty::Null)
 }
 
-fn not_yet(span: Span, what: &str, step: u32) -> Diag {
-    Diag::new(
-        span,
-        format!("{}はまだ実装していません（実装の手順 {} で対応）", what, step),
-    )
-}
-
 /// `import` なしで使える組み込みの関数。
 const BUILTINS: &[&str] = &["allocate", "length", "size", "bytes", "copy", "collect"];
+
+/// 1 つの関数の中の arena の入れ子の上限。
+pub const MAX_ARENA_DEPTH: u32 = 16;
 
 /// ジェネリクスを展開しすぎないための上限（型が無限に大きくなる書き方を止める）。
 const MAX_INSTANCES: usize = 200;
@@ -210,6 +216,13 @@ struct FieldInfo {
     offset: i64,
 }
 
+/// 入れ場所の種類：構造体のフィールド（構造体, 何番目）か、array・pointer の要素（要素の型）。
+#[derive(PartialEq, Eq, Hash)]
+enum SlotKey {
+    Field(usize, usize),
+    Elem(Ty),
+}
+
 struct StructInfo<'p> {
     def: &'p StructDef,
     module: usize,
@@ -272,6 +285,8 @@ struct Ctx<'p> {
     string_ids: HashMap<Vec<u8>, u32>,
     /// グローバル変数の初期化の関数（main の前に、この順に呼ぶ）。
     global_inits: Vec<ir::Function>,
+    /// 入れ場所の種類の番号（`ir::Function::slots`）。
+    slot_ids: HashMap<SlotKey, u32>,
 }
 
 impl<'p> Ctx<'p> {
@@ -311,6 +326,50 @@ impl<'p> Ctx<'p> {
 
     fn struct_ty(&self, i: usize) -> Ty {
         Ty::Struct(i, self.structs[i].name.clone())
+    }
+
+    /// t 型の値が、中に別のもの（構造体・配列など、arena の中で作られうるもの）を入れられるか。
+    fn is_deep(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Struct(i, _) => self.structs[*i].fields.iter().any(|f| f.ty.has_level()),
+            Ty::Array(e) | Ty::Pointer(e) => e.has_level(),
+            Ty::Maybe(inner) => self.is_deep(inner),
+            _ => false,
+        }
+    }
+
+    /// 構造体 s の j 番目のフィールドの、入れ場所の種類。中に別のものを入れられない型なら空。
+    fn field_slots(&mut self, s: usize, j: usize) -> Vec<u32> {
+        let t = self.structs[s].fields[j].ty.clone();
+        self.slots_for(SlotKey::Field(s, j), &t)
+    }
+
+    /// t 型の要素（array と pointer）の、入れ場所の種類。
+    fn elem_slots(&mut self, t: &Ty) -> Vec<u32> {
+        let key = match t {
+            Ty::Maybe(inner) => (**inner).clone(),
+            _ => t.clone(),
+        };
+        self.slots_for(SlotKey::Elem(key), t)
+    }
+
+    fn slots_for(&mut self, key: SlotKey, t: &Ty) -> Vec<u32> {
+        if !self.is_deep(t) {
+            return Vec::new();
+        }
+        let n = self.slot_ids.len() as u32;
+        vec![*self.slot_ids.entry(key).or_insert(n)]
+    }
+
+    /// `copy` で複製する中身の、入れ場所の種類すべて。
+    fn copy_slots(&mut self, t: &Ty) -> Vec<u32> {
+        match t {
+            Ty::Struct(i, _) => (0..self.structs[*i].fields.len())
+                .flat_map(|j| self.field_slots(*i, j))
+                .collect(),
+            Ty::Array(e) => self.elem_slots(e),
+            _ => Vec::new(),
+        }
     }
 
     fn exported(&self, top: TopName) -> bool {
@@ -685,6 +744,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         strings: Vec::new(),
         string_ids: HashMap::new(),
         global_inits: Vec::new(),
+        slot_ids: HashMap::new(),
     };
 
     // 1. import
@@ -946,6 +1006,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         main_returns,
         main_takes_args,
         init_funcs,
+        nslots: ctx.slot_ids.len() as u32,
     })
 }
 
@@ -1041,15 +1102,12 @@ impl<'p> Ctx<'p> {
                 src: op,
             });
             l.emit(Inst::Ret(None));
-            let f = ir::Function {
-                name: format!("グローバル変数 {} の初期化", decl.name),
-                symbol: format!("orz_init{}_{}", module, decl.name),
-                returns_value: false,
-                nparams: 0,
-                insts: std::mem::take(&mut l.insts),
-                ntemps: l.ntemps,
-                nvars: l.nvars,
-            };
+            let f = l.into_body().into_function(
+                format!("グローバル変数 {} の初期化", decl.name),
+                format!("orz_init{}_{}", module, decl.name),
+                false,
+                0,
+            );
             self.global_inits.push(f);
             self.globals[i].state = GlobalState::Done(ConstVal::Deferred);
             return Ok(ConstVal::Deferred);
@@ -1104,8 +1162,18 @@ struct FnLower<'c, 'p> {
     nvars: u32,
     nlabels: u32,
     scopes: Vec<Vec<Local>>,
-    /// `while` の（先頭、出口）のラベル。
-    loops: Vec<(u32, u32)>,
+    /// `while` の（先頭、出口）のラベルと、そのときの arena の深さ。
+    loops: Vec<(u32, u32, u32)>,
+    /// 今の arena の深さ（arena の外は 0）。
+    arena_depth: u32,
+    /// 命令ごとの、もとの文の場所。
+    spans: Vec<Span>,
+    cur_span: Span,
+    var_depth: Vec<u32>,
+    ptr_temps: Vec<bool>,
+    ptr_vars: Vec<bool>,
+    /// 命令ごとの、読み書きする入れ場所の種類（`ir::Function::slots`）。
+    slots: Vec<Vec<u32>>,
     /// 関数の中で宣言される名前すべて（エラーメッセージ用）。
     declared_somewhere: HashSet<String>,
     /// 今の場所で null でないとわかっている `maybe` の変数。
@@ -1130,15 +1198,7 @@ fn lower_func(ctx: &mut Ctx, index: usize) -> Result<ir::Function, Diag> {
         Mode::Normal,
         tparams,
     )?;
-    Ok(ir::Function {
-        name: sig.name,
-        symbol: sig.symbol,
-        returns_value: sig.ret.is_some(),
-        nparams: sig.params.len() as u32,
-        insts: l.0,
-        ntemps: l.1,
-        nvars: l.2,
-    })
+    Ok(l.into_function(sig.name, sig.symbol, sig.ret.is_some(), sig.params.len() as u32))
 }
 
 /// ジェネリクスの関数を、型引数を中身のわからない型にして確かめる。
@@ -1155,7 +1215,38 @@ fn check_generic_func(ctx: &mut Ctx, g: usize) -> Result<(), Diag> {
     Ok(())
 }
 
-/// 関数の中身を変換する。（命令, 一時変数の数, 変数の数）
+/// 関数の中身を変換したもの。
+struct Body {
+    insts: Vec<Inst>,
+    ntemps: u32,
+    nvars: u32,
+    spans: Vec<Span>,
+    var_depth: Vec<u32>,
+    ptr_temps: Vec<bool>,
+    ptr_vars: Vec<bool>,
+    slots: Vec<Vec<u32>>,
+}
+
+impl Body {
+    fn into_function(self, name: String, symbol: String, returns_value: bool, nparams: u32) -> ir::Function {
+        ir::Function {
+            name,
+            symbol,
+            returns_value,
+            nparams,
+            insts: self.insts,
+            ntemps: self.ntemps,
+            nvars: self.nvars,
+            spans: self.spans,
+            var_depth: self.var_depth,
+            ptr_temps: self.ptr_temps,
+            ptr_vars: self.ptr_vars,
+            slots: self.slots,
+        }
+    }
+}
+
+/// 関数の中身を変換する。
 fn lower_body(
     ctx: &mut Ctx,
     module: usize,
@@ -1164,13 +1255,13 @@ fn lower_body(
     ret: Option<Ty>,
     mode: Mode,
     tparams: TParams,
-) -> Result<(Vec<Inst>, u32, u32), Diag> {
+) -> Result<Body, Diag> {
     let returns = ret.is_some();
     let mut l = FnLower::new(ctx, module, ret, mode, tparams);
     collect_decls(&f.body, &mut l.declared_somewhere);
     l.scopes.push(Vec::new());
     for (p, ty) in f.params.iter().zip(params) {
-        let var = l.new_var();
+        let var = l.new_var(ty.has_level());
         l.scopes[0].push(Local {
             name: p.name.clone(),
             var,
@@ -1187,9 +1278,9 @@ fn lower_body(
             .hint("どの道を通っても `return 値;` に着くようにしてください"));
         }
     } else {
-        l.insts.push(Inst::Ret(None));
+        l.emit(Inst::Ret(None));
     }
-    Ok((l.insts, l.ntemps, l.nvars))
+    Ok(l.into_body())
 }
 
 fn collect_decls(b: &Block, out: &mut HashSet<String>) {
@@ -1359,6 +1450,26 @@ impl<'c, 'p> FnLower<'c, 'p> {
             narrowed: HashSet::new(),
             reachable: true,
             needs_init: false,
+            arena_depth: 0,
+            spans: Vec::new(),
+            cur_span: Span::default(),
+            var_depth: Vec::new(),
+            ptr_temps: Vec::new(),
+            ptr_vars: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    fn into_body(self) -> Body {
+        Body {
+            insts: self.insts,
+            ntemps: self.ntemps,
+            nvars: self.nvars,
+            spans: self.spans,
+            var_depth: self.var_depth,
+            ptr_temps: self.ptr_temps,
+            ptr_vars: self.ptr_vars,
+            slots: self.slots,
         }
     }
 
@@ -1368,11 +1479,22 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     fn temp(&mut self) -> u32 {
         self.ntemps += 1;
+        self.ptr_temps.push(false);
         self.ntemps - 1
     }
 
-    fn new_var(&mut self) -> u32 {
+    /// t 型の値を入れる一時変数。
+    fn ptr_temp(&mut self, t: &Ty) -> u32 {
+        let dst = self.temp();
+        self.ptr_temps[dst as usize] = t.has_level();
+        dst
+    }
+
+    /// 変数を作る。`ptr` は、どこかで作った値のアドレスを持つか。
+    fn new_var(&mut self, ptr: bool) -> u32 {
         self.nvars += 1;
+        self.var_depth.push(self.arena_depth);
+        self.ptr_vars.push(ptr);
         self.nvars - 1
     }
 
@@ -1383,6 +1505,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     fn emit(&mut self, i: Inst) {
         self.insts.push(i);
+        self.spans.push(self.cur_span);
+        self.slots.push(Vec::new());
+    }
+
+    /// 命令を、読み書きする入れ場所の種類と一緒に出す。
+    fn emit_slots(&mut self, i: Inst, slots: Vec<u32>) {
+        self.emit(i);
+        *self.slots.last_mut().unwrap() = slots;
     }
 
     fn top(&self, name: &str) -> Option<TopName> {
@@ -1474,7 +1604,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         if let Some(top) = self.top(name) {
             return Err(top_name_conflict(span, name, top));
         }
-        let var = self.new_var();
+        let var = self.new_var(ty.has_level());
         self.scopes.last_mut().unwrap().push(Local {
             name: name.to_string(),
             var,
@@ -1560,6 +1690,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
     }
 
     fn stmt(&mut self, s: &Stmt) -> Result<(), Diag> {
+        self.cur_span = s.span;
         match &s.kind {
             StmtKind::Decl(d) => {
                 let ty = self.resolve_type(&d.ty)?;
@@ -1577,19 +1708,28 @@ impl<'c, 'p> FnLower<'c, 'p> {
             StmtKind::While { cond, body } => self.while_stmt(cond, body)?,
             StmtKind::Break | StmtKind::Continue => {
                 let is_break = matches!(s.kind, StmtKind::Break);
-                let Some(&(head, end)) = self.loops.last() else {
+                let Some(&(head, end, depth)) = self.loops.last() else {
                     let kw = if is_break { "break" } else { "continue" };
                     return Err(Diag::new(
                         s.span,
                         format!("`{}` は `while` の中でだけ使えます", kw),
                     ));
                 };
+                // while の中にある arena から抜けるなら、その分を返す。
+                if self.arena_depth > depth {
+                    self.emit(Inst::ArenaPop {
+                        n: self.arena_depth - depth,
+                    });
+                }
                 self.emit(Inst::Jump(if is_break { end } else { head }));
                 self.reachable = false;
             }
             StmtKind::Return(None) => {
                 if self.ret.is_some() {
                     return Err(Diag::new(s.span, "値を返す関数なので、`return` に値が必要です"));
+                }
+                if self.arena_depth > 0 {
+                    self.emit(Inst::ArenaPop { n: self.arena_depth });
                 }
                 self.emit(Inst::Ret(None));
                 self.reachable = false;
@@ -1600,10 +1740,29 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         .hint("値を返すなら、`function 32 名前(...)` のように戻り値の型を書きます"));
                 };
                 let v = self.expr_as(e, &ty)?;
+                if self.arena_depth > 0 {
+                    self.emit(Inst::ArenaPop { n: self.arena_depth });
+                }
                 self.emit(Inst::Ret(Some(v)));
                 self.reachable = false;
             }
-            StmtKind::Arena(_) => return Err(not_yet(s.span, "`arena`", 7)),
+            StmtKind::Arena(b) => {
+                if self.arena_depth >= MAX_ARENA_DEPTH {
+                    return Err(Diag::new(
+                        s.span,
+                        format!(
+                            "arena の入れ子が深すぎます（1 つの関数の中で {} 段まで）",
+                            MAX_ARENA_DEPTH
+                        ),
+                    ));
+                }
+                self.emit(Inst::ArenaEnter);
+                self.arena_depth += 1;
+                self.block(b)?;
+                self.arena_depth -= 1;
+                self.cur_span = b.close;
+                self.emit(Inst::ArenaExit);
+            }
             StmtKind::Expr(e) => match &e.kind {
                 ExprKind::Call(callee, args) => {
                     self.call(e, callee, args, None)?;
@@ -1683,23 +1842,29 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         return Ok(());
                     }
                 }
-                let (addr, fty) = self.field_addr(target, obj, f)?;
+                let (addr, fty, slots) = self.field_addr(target, obj, f)?;
                 let v = self.expr_as(value, &fty)?;
-                self.emit(Inst::StoreMem {
-                    addr,
-                    src: v,
-                    width: fty.width(),
-                });
+                self.emit_slots(
+                    Inst::StoreMem {
+                        addr,
+                        src: v,
+                        width: fty.width(),
+                    },
+                    slots,
+                );
                 return Ok(());
             }
             ExprKind::Index(base, index) => {
-                let (addr, elem) = self.elem_addr(target, base, index)?;
+                let (addr, elem, slots) = self.elem_addr(target, base, index)?;
                 let v = self.expr_as(value, &elem)?;
-                self.emit(Inst::StoreMem {
-                    addr,
-                    src: v,
-                    width: elem.width(),
-                });
+                self.emit_slots(
+                    Inst::StoreMem {
+                        addr,
+                        src: v,
+                        width: elem.width(),
+                    },
+                    slots,
+                );
                 return Ok(());
             }
             _ => {
@@ -1782,7 +1947,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         });
         self.emit(Inst::Label(body_l));
         self.narrowed = &head_state | &true_facts;
-        self.loops.push((head, end));
+        self.loops.push((head, end, self.arena_depth));
         self.block(body)?;
         self.loops.pop();
         self.emit(Inst::Jump(head));
@@ -1989,6 +2154,17 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
     /// 式を計算する。`want` は文脈から期待される型（整数リテラルの型などを決めるのに使う）。
     fn expr(&mut self, e: &Expr, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
+        let (v, t) = self.expr_inner(e, want)?;
+        // arena の持ち出しの検査のため、アドレスを持つ一時変数に印を付ける。
+        if let Operand::Temp(i) = v {
+            if t.has_level() {
+                self.ptr_temps[i as usize] = true;
+            }
+        }
+        Ok((v, t))
+    }
+
+    fn expr_inner(&mut self, e: &Expr, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
         match &e.kind {
             ExprKind::Int(n) => int_literal(*n, false, want, e.span),
             ExprKind::Float(f) => dec_literal(*f, false, e.span),
@@ -2064,13 +2240,16 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
             },
             ExprKind::Index(base, index) => {
-                let (addr, elem) = self.elem_addr(e, base, index)?;
-                let dst = self.temp();
-                self.emit(Inst::Load {
-                    dst,
-                    addr,
-                    width: elem.width(),
-                });
+                let (addr, elem, slots) = self.elem_addr(e, base, index)?;
+                let dst = self.ptr_temp(&elem);
+                self.emit_slots(
+                    Inst::Load {
+                        dst,
+                        addr,
+                        width: elem.width(),
+                    },
+                    slots,
+                );
                 Ok((Operand::Temp(dst), elem))
             }
             ExprKind::Field(obj, f) => {
@@ -2086,13 +2265,16 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         };
                     }
                 }
-                let (addr, fty) = self.field_addr(e, obj, f)?;
-                let dst = self.temp();
-                self.emit(Inst::Load {
-                    dst,
-                    addr,
-                    width: fty.width(),
-                });
+                let (addr, fty, slots) = self.field_addr(e, obj, f)?;
+                let dst = self.ptr_temp(&fty);
+                self.emit_slots(
+                    Inst::Load {
+                        dst,
+                        addr,
+                        width: fty.width(),
+                    },
+                    slots,
+                );
                 Ok((Operand::Temp(dst), fty))
             }
             ExprKind::Generic(inner, types) => {
@@ -2314,7 +2496,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
     }
 
     /// `a[i]` の要素のアドレス。（アドレス, 要素の型）
-    fn elem_addr(&mut self, e: &Expr, base: &Expr, index: &Expr) -> Result<(Operand, Ty), Diag> {
+    /// `a[i]` の要素のアドレス。（アドレス, 要素の型, 入れ場所の種類）
+    fn elem_addr(&mut self, e: &Expr, base: &Expr, index: &Expr) -> Result<(Operand, Ty, Vec<u32>), Diag> {
         let (bv, bt) = self.expr(base, None)?;
         let (elem, checked) = match &bt {
             Ty::Array(t) => ((**t).clone(), true),
@@ -2364,11 +2547,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
             index: iv,
             scale: elem.width().bytes(),
         });
-        Ok((Operand::Temp(dst), elem))
+        let slots = self.ctx.elem_slots(&elem);
+        Ok((Operand::Temp(dst), elem, slots))
     }
 
-    /// `p.x` のフィールドのアドレス。（アドレス, フィールドの型）
-    fn field_addr(&mut self, e: &Expr, obj: &Expr, field: &str) -> Result<(Operand, Ty), Diag> {
+    /// `p.x` のフィールドのアドレス。（アドレス, フィールドの型, 入れ場所の種類）
+    fn field_addr(&mut self, e: &Expr, obj: &Expr, field: &str) -> Result<(Operand, Ty, Vec<u32>), Diag> {
         let (ov, ot) = self.expr(obj, None)?;
         let i = match &ot {
             Ty::Struct(i, _) => *i,
@@ -2391,7 +2575,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 ))
             }
         };
-        let Some(f) = self.ctx.structs[i].fields.iter().find(|f| f.name == field) else {
+        let Some(j) = self.ctx.structs[i].fields.iter().position(|f| f.name == field) else {
             let names: Vec<&str> = self.ctx.structs[i]
                 .fields
                 .iter()
@@ -2414,6 +2598,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
             )));
         };
+        let f = &self.ctx.structs[i].fields[j];
         let (offset, fty) = (f.offset, f.ty.clone());
         let dst = self.temp();
         self.emit(Inst::ElemAddr {
@@ -2422,7 +2607,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
             index: Operand::Imm(offset),
             scale: 1,
         });
-        Ok((Operand::Temp(dst), fty))
+        let slots = self.ctx.field_slots(i, j);
+        Ok((Operand::Temp(dst), fty, slots))
     }
 
     fn binary(
@@ -2698,7 +2884,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             }
             return Ok((Operand::Temp(dst), Ty::Bool));
         }
-        let result = self.new_var();
+        let result = self.new_var(false);
         let rhs = self.label();
         let short = self.label();
         let end = self.label();
@@ -3045,7 +3231,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         }
         let size = self.ctx.structs[index].size;
         let p = self.rt_value(Rt::Alloc, vec![Operand::Imm(size)], e.span)?;
-        for (v, (_, ty, offset)) in values.into_iter().zip(&fields) {
+        for (j, (v, (_, ty, offset))) in values.into_iter().zip(&fields).enumerate() {
             let addr = self.temp();
             self.emit(Inst::ElemAddr {
                 dst: addr,
@@ -3053,11 +3239,15 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 index: Operand::Imm(*offset),
                 scale: 1,
             });
-            self.emit(Inst::StoreMem {
-                addr: Operand::Temp(addr),
-                src: v,
-                width: ty.width(),
-            });
+            let slots = self.ctx.field_slots(index, j);
+            self.emit_slots(
+                Inst::StoreMem {
+                    addr: Operand::Temp(addr),
+                    src: v,
+                    width: ty.width(),
+                },
+                slots,
+            );
         }
         Ok((p, self.ctx.struct_ty(index)))
     }
@@ -3197,6 +3387,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         ))
                     }
                 };
+                // 複製したものは、もとと同じものを指す（arena の持ち出しの検査に使う）。
+                let slots = self.ctx.copy_slots(&t);
+                *self.slots.last_mut().unwrap() = slots;
                 Ok(Some((r, t)))
             }
             "size" => Err(Diag::new(e.span, "`size` には型を書きます").hint("例：size(:32)")),
@@ -3408,6 +3601,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ],
             e.span,
         )?;
+        let slots = self.ctx.elem_slots(&elem);
         for (i, v) in values.into_iter().enumerate() {
             let addr = self.temp();
             self.emit(Inst::ElemAddr {
@@ -3416,11 +3610,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 index: Operand::Imm(i as i64),
                 scale: width.bytes(),
             });
-            self.emit(Inst::StoreMem {
-                addr: Operand::Temp(addr),
-                src: v,
-                width,
-            });
+            self.emit_slots(
+                Inst::StoreMem {
+                    addr: Operand::Temp(addr),
+                    src: v,
+                    width,
+                },
+                slots.clone(),
+            );
         }
         Ok((arr, Ty::Array(Box::new(elem))))
     }

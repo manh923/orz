@@ -1,0 +1,9 @@
+// error: arena の中で作った値を、arena の外で宣言した変数に入れています
+function nothing main() {
+    arena {
+        s:string = "";
+        arena {
+            s = to:string(1);
+        }
+    }
+}
