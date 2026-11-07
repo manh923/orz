@@ -1,0 +1,53 @@
+// exit: 0
+// 生きているものは、GC が何度動いても消えない
+import stdio;
+
+struct Node {
+    value:32;
+    text:string;
+    next:maybe:Node;
+}
+
+keep:maybe:Node = null;
+names:array:string = [];
+
+function 64 sum(n:maybe:Node) {
+    s:64 = 0;
+    cur:maybe:Node = n;
+    while (cur != null) {
+        s = s + to:64(cur.value) + to:64(length(cur.text));
+        cur = cur.next;
+    }
+    return s;
+}
+
+function nothing main() {
+    local:maybe:Node = null;
+    names = array(100);
+    boxed:maybe:32 = 0;
+    i:32 = 0;
+    while (i < 300000) {
+        garbage:string = "x" + to:string(i);
+        if (i % 1000 == 0) {
+            local = Node(i, garbage, local);
+            names[i / 3000] = garbage;
+            boxed = i;
+        }
+        if (i % 1500 == 0) {
+            keep = Node(1, "g", keep);
+        }
+        if (i % 50000 == 0) {
+            collect();
+        }
+        i = i + 1;
+    }
+    // 文字列の途中を指すポインタだけでも、文字列は消えない
+    p:pointer:8 = bytes(names[50]);
+    names[50] = "";
+    collect();
+    stdio.print(sum(local));
+    stdio.print(sum(keep));
+    stdio.print(names[99]);
+    stdio.print(p[1]);
+    stdio.print(boxed);
+}

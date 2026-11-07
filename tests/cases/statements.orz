@@ -1,0 +1,18 @@
+// exit: 25
+// nothing の関数の呼び出しと、戻り値を使わない呼び出し
+total:32 = 0;
+
+function nothing add(x:32) {
+    total = total + x;
+}
+
+function 32 twice(x:32) {
+    total = total + x * 2;
+    return total;
+}
+
+function 32 main() {
+    add(5);
+    twice(10);
+    return total;
+}

@@ -1,0 +1,17 @@
+// exit: 147
+// 1〜20 のうち、3 の倍数を除いた和
+function 32 main() {
+    sum:32 = 0;
+    i:32 = 0;
+    while (true) {
+        i = i + 1;
+        if (i > 20) {
+            break;
+        }
+        if (i % 3 == 0) {
+            continue;
+        }
+        sum = sum + i;
+    }
+    return sum;
+}

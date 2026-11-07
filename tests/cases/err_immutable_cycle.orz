@@ -1,0 +1,7 @@
+// error: 自分自身を使っています
+immutable A:32 = B + 1;
+immutable B:32 = A + 1;
+
+function 32 main() {
+    return A;
+}

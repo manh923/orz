@@ -1,0 +1,5 @@
+// error: `geom` という名前空間はありません
+function 32 main() {
+    p:geom.Point = geom.Point(1, 2);
+    return 0;
+}

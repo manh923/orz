@@ -1,0 +1,8 @@
+// error: `f` はジェネリクスではないので、型は付けられません
+function 32 f(x:32) {
+    return x;
+}
+
+function nothing main() {
+    y:32 = f:32(1);
+}

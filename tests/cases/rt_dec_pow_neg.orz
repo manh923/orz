@@ -1,0 +1,5 @@
+// runtime: 負の数を、整数でない数で累乗しました
+function nothing main() {
+    x:decnum = -8.0;
+    y:decnum = x ^ 0.5;
+}

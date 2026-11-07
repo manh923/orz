@@ -1,0 +1,74 @@
+// exit: 0
+import stdio;
+
+struct Point {
+    x:32;
+    y:32;
+}
+
+struct Node {
+    value:32;
+    next:maybe:Node;
+}
+
+struct Person {
+    name:string;
+    age:8;
+    height:decnum;
+    tags:array:string;
+    best:maybe:Person;
+}
+
+function 32 sum(list:maybe:Node) {
+    s:32 = 0;
+    cur:maybe:Node = list;
+    while (cur != null) {
+        s = s + cur.value;
+        cur = cur.next;
+    }
+    return s;
+}
+
+function nothing move(p:Point, dx:32) {
+    p.x = p.x + dx;
+}
+
+function nothing main() {
+    p:Point = Point(1, 2);
+    stdio.print(p.x + p.y);
+    // 代入しても同じものを指す
+    q:Point = p;
+    q.x = 5;
+    stdio.print(p.x);
+    // copy は別のものを作る
+    r:Point = copy(p);
+    r.x = 7;
+    stdio.print(p);
+    stdio.print(r);
+    stdio.print(p == q);
+    stdio.print(p == r);
+    move(p, 10);
+    stdio.print(p.x);
+    list:Node = Node(1, Node(2, Node(3, null)));
+    stdio.print(sum(list));
+    stdio.print(list);
+    list.next = null;
+    stdio.print(sum(list));
+    taro:Person = Person("太郎", 20, 170.5, ["a", "b"], null);
+    hanako:Person = Person("花子", 21, 160.0, [], taro);
+    stdio.print(hanako);
+    hanako.tags = ["c"];
+    stdio.print(hanako.tags);
+    stdio.print(size(:Point));
+    stdio.print(size(:Person));
+    ps:array:Point = [Point(1, 1), Point(2, 2)];
+    ps[1].y = 9;
+    stdio.print(ps);
+    mp:array:maybe:Point = array(2);
+    mp[0] = p;
+    stdio.print(mp);
+    // 自分自身を指す（表示は深さ 20 まで）
+    loop:Node = Node(0, null);
+    loop.next = loop;
+    stdio.print(sum(Node(5, Node(6, null))));
+}

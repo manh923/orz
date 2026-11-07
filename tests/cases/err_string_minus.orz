@@ -1,0 +1,4 @@
+// error: 文字列でできるのは `+`（連結）と `==`・`!=` だけです
+function nothing main() {
+    s:string = "a" - "b";
+}

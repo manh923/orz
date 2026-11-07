@@ -1,0 +1,8 @@
+// error: 構造体 `Box` を作るときは、型を書きます
+struct Box:T {
+    v:T;
+}
+
+function nothing main() {
+    b:Box:32 = Box(1);
+}

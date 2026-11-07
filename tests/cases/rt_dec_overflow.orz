@@ -1,0 +1,5 @@
+// runtime: rt_dec_overflow.orz:4: 計算の結果が decnum の範囲を超えました
+function nothing main() {
+    x:decnum = 1e308;
+    y:decnum = x * 10;
+}

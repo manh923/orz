@@ -1,0 +1,6 @@
+// error: `secret` の `hidden` は export されていません
+import "modules/secret.orz";
+
+function 32 main() {
+    return secret.hidden();
+}

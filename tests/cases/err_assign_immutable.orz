@@ -1,0 +1,6 @@
+// error: `W` は immutable なので、値を変えられません
+immutable W:32 = 80;
+
+function nothing main() {
+    W = 81;
+}

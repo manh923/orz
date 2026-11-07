@@ -1,0 +1,12 @@
+[package]
+name = "orz"
+version = "0.1.0"
+edition = "2021"
+description = "orz 言語のコンパイラ"
+license = "MIT"
+
+[[bin]]
+name = "orz"
+path = "src/main.rs"
+
+[dependencies]

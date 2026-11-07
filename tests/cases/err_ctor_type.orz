@@ -1,0 +1,9 @@
+// error: `32` 型の値が必要ですが、この式は `string` 型です
+struct Point {
+    x:32;
+    y:32;
+}
+
+function nothing main() {
+    p:Point = Point(1, "2");
+}

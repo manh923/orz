@@ -1,0 +1,5 @@
+// error: 型の違う数は混ぜられません。`to:decnum(…)` で変換してください
+function nothing main() {
+    n:32 = 2;
+    d:decnum = 1.5 * n;
+}

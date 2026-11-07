@@ -1,0 +1,7 @@
+// error: 計算の結果が 32 の範囲
+// immutable の値はコンパイル時に決まるので、溢れるのもコンパイル時にわかる
+immutable BIG:32 = 2147483647;
+
+function 32 main() {
+    return BIG + 1;
+}

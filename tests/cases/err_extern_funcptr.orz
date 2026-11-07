@@ -1,0 +1,6 @@
+// error: `extern` の関数 `f` は、関数ポインタにはできません
+extern function nothing f(x:32);
+
+function nothing main() {
+    g:function:nothing(32) = f;
+}

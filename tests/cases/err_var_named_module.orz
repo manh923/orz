@@ -1,0 +1,6 @@
+// error: `stdio` は名前空間（import）の名前なので、変数の名前には使えません
+import stdio;
+
+function nothing main() {
+    stdio:32 = 1;
+}

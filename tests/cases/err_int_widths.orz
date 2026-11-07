@@ -1,0 +1,5 @@
+// error: 型の違う数は混ぜられません。`to:64(…)` で変換してください
+function nothing main() {
+    a:32 = 1;
+    b:64 = a;
+}

@@ -1,0 +1,8 @@
+// error: `f` という名前が 2 回定義されています
+f:32 = 0;
+
+function nothing f() {
+}
+
+function nothing main() {
+}

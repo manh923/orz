@@ -1,0 +1,4 @@
+// error: 整数の型は `8`、`32`、`64` です
+function nothing main() {
+    x:int = 1;
+}

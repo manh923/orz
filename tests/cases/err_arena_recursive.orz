@@ -1,0 +1,14 @@
+// error: 関数 `down` に渡した 1 番目の引数
+saved:string = "";
+function nothing down(s:string, n:32) {
+    if (n == 0) {
+        saved = s;
+        return;
+    }
+    down(s, n - 1);
+}
+function nothing main() {
+    arena {
+        down(to:string(1), 10);
+    }
+}

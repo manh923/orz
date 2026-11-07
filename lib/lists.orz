@@ -1,0 +1,91 @@
+// lists：長さの変わる配列（標準ライブラリ）
+//
+// import lists; で使う。
+//
+//     l:lists.List:string = lists.new();
+//     lists.push(l, "a");
+//     lists.push(l, "b");
+//     s:string = lists.get(l, 0);       // "a"
+//     n:32 = lists.count(l);             // 2
+//     a:array:string = lists.to_array(l);
+//
+// 添字が範囲の外なら、実行時エラーで止まる。
+
+extern function nothing orz_rt_fail(msg:string);
+
+export struct List:T {
+    items:array:T;
+    count:32;
+}
+
+export function List:T new:T() {
+    return List:T([], 0);
+}
+
+// 後ろに足す。
+export function nothing push:T(l:List:T, x:T) {
+    if (l.count == length(l.items)) {
+        cap:32 = length(l.items) * 2;
+        if (cap < 8) {
+            cap = 8;
+        }
+        bigger:array:T = array(cap, x);
+        i:32 = 0;
+        while (i < l.count) {
+            bigger[i] = l.items[i];
+            i = i + 1;
+        }
+        l.items = bigger;
+    }
+    l.items[l.count] = x;
+    l.count = l.count + 1;
+}
+
+export function T get:T(l:List:T, i:32) {
+    check(i, l.count, "lists.get");
+    return l.items[i];
+}
+
+export function nothing set:T(l:List:T, i:32, x:T) {
+    check(i, l.count, "lists.set");
+    l.items[i] = x;
+}
+
+// 最後のものを取り出す。空なら実行時エラー。
+export function T pop:T(l:List:T) {
+    if (l.count == 0) {
+        orz_rt_fail("空のリストから lists.pop で取り出そうとしました");
+    }
+    l.count = l.count - 1;
+    return l.items[l.count];
+}
+
+export function 32 count:T(l:List:T) {
+    return l.count;
+}
+
+// 空にする。
+export function nothing clear:T(l:List:T) {
+    l.items = [];
+    l.count = 0;
+}
+
+// 今の中身を、新しい配列にする。
+export function array:T to_array:T(l:List:T) {
+    if (l.count == 0) {
+        return [];
+    }
+    a:array:T = array(l.count, l.items[0]);
+    i:32 = 0;
+    while (i < l.count) {
+        a[i] = l.items[i];
+        i = i + 1;
+    }
+    return a;
+}
+
+function nothing check(i:32, n:32, what:string) {
+    if (i < 0 or i >= n) {
+        orz_rt_fail(what + " の添字 " + to:string(i) + " が、長さ " + to:string(n) + " の範囲の外です");
+    }
+}

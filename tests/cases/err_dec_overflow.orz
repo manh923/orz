@@ -1,0 +1,4 @@
+// error: コンパイル時にわかる誤り：計算の結果が decnum の範囲を超えました
+function nothing main() {
+    d:decnum = 1e308 * 10;
+}

@@ -1,0 +1,7 @@
+// error: arena の中で作った値を、グローバル変数に入れています
+last:string = "";
+function nothing main() {
+    arena {
+        last = to:string(42);
+    }
+}

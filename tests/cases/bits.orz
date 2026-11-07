@@ -1,0 +1,4 @@
+// exit: 24
+function 32 main() {
+    return (12 and 10) or (1 << 4);
+}

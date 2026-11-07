@@ -1,0 +1,4 @@
+// exit: 255
+function 32 main() {
+    return 0xFF;
+}

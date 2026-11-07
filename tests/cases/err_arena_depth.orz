@@ -1,0 +1,8 @@
+// error: arena の入れ子が深すぎます（1 つの関数の中で 16 段まで）
+function nothing main() {
+    arena { arena { arena { arena { arena { arena { arena { arena {
+    arena { arena { arena { arena { arena { arena { arena { arena {
+    arena { }
+    } } } } } } } }
+    } } } } } } } }
+}

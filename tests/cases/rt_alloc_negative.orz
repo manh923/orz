@@ -1,0 +1,5 @@
+// runtime: allocate に負の大きさ -8 が渡されました
+function nothing main() {
+    n:32 = -8;
+    p:pointer:8 = allocate(n);
+}

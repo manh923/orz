@@ -1,0 +1,4 @@
+// error: `break` は `while` の中でだけ使えます
+function nothing main() {
+    break;
+}

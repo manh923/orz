@@ -1,0 +1,11 @@
+// runtime: 配列の範囲外です（添字 5、長さ 0）
+// 実行時エラーの前に表示したものは、ちゃんと出る
+import stdio;
+
+function nothing main() {
+    stdio.print("ここまで表示");
+    stdio.put("改行なしも");
+    a:array:32 = [];
+    i:32 = 5;
+    a[i] = 1;
+}

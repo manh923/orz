@@ -1,0 +1,26 @@
+// exit: 0
+import stdio;
+
+function nothing main() {
+    ok:bool = stdio.write_file("a.txt", "一行目\n二行目\n");
+    stdio.print(ok);
+    text:maybe:string = stdio.read_file("a.txt");
+    if (text != null) {
+        stdio.put(text);
+        stdio.print(length(text));
+    }
+    stdio.print(stdio.last_error());
+    missing:maybe:string = stdio.read_file("nothing.txt");
+    stdio.print(missing);
+    stdio.print(stdio.last_error());
+    dir:maybe:string = stdio.read_file(".");
+    stdio.print(dir);
+    stdio.print(stdio.last_error());
+    stdio.print(stdio.write_file("no/such/dir.txt", "x"));
+    stdio.print(stdio.last_error());
+    empty:bool = stdio.write_file("empty.txt", "");
+    e:maybe:string = stdio.read_file("empty.txt");
+    if (e != null) {
+        stdio.print(length(e));
+    }
+}

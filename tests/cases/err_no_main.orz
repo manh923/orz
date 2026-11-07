@@ -1,0 +1,4 @@
+// error: `main` 関数がありません
+function 32 f() {
+    return 1;
+}

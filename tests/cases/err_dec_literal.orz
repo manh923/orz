@@ -1,0 +1,4 @@
+// error: 小数が大きすぎて、decnum の範囲に入りません
+function nothing main() {
+    d:decnum = 1e400;
+}

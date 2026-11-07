@@ -1,0 +1,5 @@
+// runtime: 変換する値 1e20 が 64 の範囲
+function nothing main() {
+    x:decnum = 1e20;
+    n:64 = to:64(x);
+}

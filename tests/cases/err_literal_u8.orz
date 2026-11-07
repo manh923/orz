@@ -1,0 +1,4 @@
+// error: `300` は 8 の範囲（0〜255）に入りません
+function nothing main() {
+    x:8 = 300;
+}

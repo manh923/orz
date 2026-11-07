@@ -1,0 +1,11 @@
+// error: 関数 `keep` に渡した 1 番目の引数（arena の中で作った値）が
+saved:string = "";
+function nothing keep(s:string) { saved = s; }
+function nothing ignore(s:string) { }
+function nothing main() {
+    f:function:nothing(string) = ignore;
+    f = keep;
+    arena {
+        f(to:string(1));
+    }
+}

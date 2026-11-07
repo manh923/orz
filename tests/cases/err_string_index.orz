@@ -1,0 +1,5 @@
+// error: 文字列に `[ ]` は使えません
+function nothing main() {
+    s:string = "abc";
+    c:8 = s[0];
+}

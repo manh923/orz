@@ -1,0 +1,5 @@
+// error: 自分のファイルの `import` はまだ実装していません
+import "util.orz";
+
+function nothing main() {
+}

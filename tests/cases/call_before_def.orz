@@ -1,0 +1,8 @@
+// exit: 16
+function 32 main() {
+    return later(4);
+}
+
+function 32 later(x:32) {
+    return x * x;
+}

@@ -1,0 +1,17 @@
+// error: 関数 `set` に渡した 2 番目の引数（arena の中で作った値）が、1 番目の引数（それより外で作ったもの）の中に入れられます
+struct Box { items:array:string; }
+struct Holder { b:Box; }
+g_box:Box = Box([""]);
+function nothing attach(h:Holder, b:Box) { h.b = b; }
+function Box getb(h:Holder) { return h.b; }
+function Box id(b:Box) { return b; }
+function nothing deep(h:Holder, s:string, n:32) { if (n == 0) { h.b.items[0] = s; return; } deep(h, s, n - 1); }
+function nothing set(b:Box, s:string) { b.items[0] = s; }
+function nothing rename(b:Box) { b.items[0] = to:string(9); }
+function nothing put_box(a:array:Box, b:Box) { a[0] = b; }
+
+function nothing main() {
+    outer:Box = Box(["a"]);
+    c:bool = length(outer.items) > 0;
+    arena { b:Box = Box([""]); arena { set(b, to:string(1)); } }
+}

@@ -1,0 +1,8 @@
+// runtime: rt_div_param.orz:3: 0 で割りました
+function 32 div(a:32, b:32) {
+    return a / b;
+}
+
+function 32 main() {
+    return div(10, 0);
+}

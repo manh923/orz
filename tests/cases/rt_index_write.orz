@@ -1,0 +1,6 @@
+// runtime: rt_index_write.orz:5: 配列の範囲外です（添字 3、長さ 3）
+function nothing main() {
+    a:array:string = array(3);
+    n:32 = length(a);
+    a[n] = "x";
+}

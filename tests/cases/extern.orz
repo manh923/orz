@@ -1,0 +1,16 @@
+// exit: 0
+// extern の関数と .orh
+import stdio;
+import "modules/rt.orh";
+
+extern function 64 orz_rt_str_eq(a:string, b:string);
+
+function nothing main() {
+    s:string = rt.orz_rt_str_concat(rt.GREETING, "！");
+    stdio.print(s);
+    stdio.print(orz_rt_str_eq(s, "やあ！"));
+    a:array:8 = [104, 105];
+    stdio.print(rt.orz_rt_str_from_bytes(bytes(to:address(a)), 2));
+    p:rt.Pair = rt.Pair(1, 2);
+    stdio.print(p);
+}

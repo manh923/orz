@@ -1,0 +1,3 @@
+export function 32 divide(a:32, b:32) {
+    return a / b;
+}

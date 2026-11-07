@@ -1,0 +1,4 @@
+// exit: 0
+function nothing main() {
+    return;
+}

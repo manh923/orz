@@ -1,0 +1,39 @@
+// exit: 0
+// グローバル変数の初期値に、配列・構造体・文字列の連結を書ける（main の前に作る）
+import stdio;
+
+struct Point {
+    x:32;
+    y:32;
+}
+
+immutable SIZE:32 = 4;
+immutable TABLE:array:32 = [1, 2, 3];
+table:array:32 = [1, 2, 3];
+names:array:string = array(SIZE);
+immutable ORIGIN:Point = Point(0, 0);
+immutable GREETING:string = "やあ";
+message:string = GREETING + "、orz";
+grid:array:array:32 = [[1, 2], [3]];
+count:32 = length(TABLE);
+boxed:maybe:32 = 5;
+list:array:Point = [Point(1, 2), ORIGIN];
+
+function nothing main() {
+    stdio.print(table);
+    table[0] = 10;
+    stdio.print(table);
+    names[1] = "b";
+    stdio.print(names);
+    // immutable の構造体も、フィールドは変えられる（同じものを指しているので list[1] も変わる）
+    ORIGIN.x = 5;
+    stdio.print(ORIGIN);
+    stdio.print(list[1]);
+    stdio.print(message);
+    stdio.print(grid);
+    stdio.print(count);
+    stdio.print(boxed);
+    // immutable の配列も、要素は変えられる（変数に別の配列を入れられないだけ）
+    TABLE[2] = 30;
+    stdio.print(TABLE);
+}

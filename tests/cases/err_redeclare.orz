@@ -1,0 +1,5 @@
+// error: 変数 `x` はこのブロックでもう宣言されています
+function nothing main() {
+    x:32 = 1;
+    x:32 = 2;
+}

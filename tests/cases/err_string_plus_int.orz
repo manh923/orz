@@ -1,0 +1,4 @@
+// error: 文字列にするなら `to:string(…)` を使います
+function nothing main() {
+    s:string = "a" + 1;
+}

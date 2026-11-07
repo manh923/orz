@@ -1,0 +1,8 @@
+// error: `g` はグローバル変数の名前なので、変数の名前には使えません
+g:32 = 0;
+
+function nothing f(g:32) {
+}
+
+function nothing main() {
+}

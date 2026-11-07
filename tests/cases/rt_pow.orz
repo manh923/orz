@@ -1,0 +1,5 @@
+// runtime: 計算の結果が 32 の範囲
+// flags: --no-fold
+function 32 main() {
+    return 2 ^ 31;
+}

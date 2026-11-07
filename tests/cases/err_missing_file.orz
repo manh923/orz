@@ -1,0 +1,6 @@
+// error: ファイル `modules/nothere.orz` が見つかりません
+import "modules/nothere.orz";
+
+function 32 main() {
+    return 0;
+}

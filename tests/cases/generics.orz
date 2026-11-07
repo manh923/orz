@@ -1,0 +1,115 @@
+// exit: 0
+import stdio;
+
+struct List:T {
+    items:array:T;
+    count:32;
+}
+
+struct Pair:K:V {
+    key:K;
+    value:V;
+}
+
+function T get:T(list:List:T, i:32) {
+    return list.items[i];
+}
+
+function nothing push:T(list:List:T, v:T) {
+    list.items[list.count] = v;
+    list.count = list.count + 1;
+}
+
+function nothing sort:T(a:array:T, less:function:bool(T, T)) {
+    i:32 = 1;
+    while (i < length(a)) {
+        j:32 = i;
+        while (j > 0 and less(a[j], a[j - 1])) {
+            t:T = a[j];
+            a[j] = a[j - 1];
+            a[j - 1] = t;
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+}
+
+function bool less32(a:32, b:32) {
+    return a < b;
+}
+
+function bool longer(a:string, b:string) {
+    return length(a) > length(b);
+}
+
+function 32 add(a:32, b:32) {
+    return a + b;
+}
+
+function 32 apply(f:function:32(32, 32), x:32, y:32) {
+    return f(x, y);
+}
+
+function U map_first:T:U(list:List:T, f:function:U(T)) {
+    return f(list.items[0]);
+}
+
+function string describe(n:32) {
+    return "数 " + to:string(n);
+}
+
+function nothing hello() {
+    stdio.print("hello");
+}
+
+function maybe:T first_or_null:T(a:array:T) {
+    if (length(a) == 0) {
+        return null;
+    }
+    return a[0];
+}
+
+function nothing main() {
+    nums:List:32 = List:32(array(10), 0);
+    push(nums, 5);
+    push(nums, 3);
+    push:32(nums, 9);
+    x:32 = get(nums, 0);
+    y:32 = get:32(nums, 2);
+    stdio.print(x + y);
+    stdio.print(nums);
+    words:List:string = List:string(array(3), 0);
+    push(words, "orz");
+    stdio.print(get(words, 0));
+    a:array:32 = [5, 2, 8, 1];
+    sort(a, less32);
+    stdio.print(a);
+    s:array:string = ["a", "ccc", "bb"];
+    sort(s, longer);
+    stdio.print(s);
+    f:function:32(32, 32) = add;
+    stdio.print(f(1, 2));
+    stdio.print(apply(add, 3, 4));
+    g:function:nothing() = hello;
+    g();
+    stdio.print(map_first(nums, describe));
+    p:Pair:string:32 = Pair:string:32("a", 1);
+    stdio.print(p);
+    lp:List:Pair:string:32 = List:Pair:string:32([Pair:string:32("x", 2)], 1);
+    stdio.print(lp.count);
+    m:maybe:32 = first_or_null(a);
+    stdio.print(m);
+    e:array:32 = [];
+    stdio.print(first_or_null(e));
+    h:maybe:function:32(32, 32) = null;
+    if (h == null) {
+        h = add;
+    }
+    if (h != null) {
+        stdio.print(h(10, 20));
+    }
+    ops:array:function:32(32, 32) = [add, add];
+    stdio.print(ops[1](2, 2));
+    lf:function:bool(32, 32) = less32;
+    stdio.print(lf == less32);
+}

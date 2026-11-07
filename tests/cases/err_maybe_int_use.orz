@@ -1,0 +1,5 @@
+// error: `32` 型の値が必要ですが、この式は `maybe:32` 型です
+function 32 main() {
+    n:maybe:32 = to:32("1");
+    return n;
+}

@@ -1,0 +1,11 @@
+// exit: 6
+function 32 gcd(a:32, b:32) {
+    if (b == 0) {
+        return a;
+    }
+    return gcd(b, a % b);
+}
+
+function 32 main() {
+    return gcd(48, 18);
+}

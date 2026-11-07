@@ -1,0 +1,62 @@
+// exit: 0
+import stdio;
+
+counter:maybe:32 = 10;
+nothing_yet:maybe:decnum = null;
+
+function maybe:32 parse_or_null(s:string) {
+    return to:32(s);
+}
+
+function 32 or_zero(x:maybe:32) {
+    if (x == null) {
+        return 0;
+    }
+    return x;
+}
+
+function nothing main() {
+    n:maybe:32 = to:32("42");
+    if (n != null) {
+        stdio.print(n + 1);
+    }
+    stdio.print(n);
+    stdio.print(to:32("-2147483648"));
+    stdio.print(to:32("2147483648"));
+    stdio.print(to:32("4x2"));
+    stdio.print(to:32(""));
+    stdio.print(to:32("+7"));
+    stdio.print(to:8("255"));
+    stdio.print(to:8("256"));
+    stdio.print(to:8("-1"));
+    stdio.print(to:64("-9223372036854775808"));
+    stdio.print(to:64("9223372036854775808"));
+    stdio.print(to:decnum("3.14"));
+    stdio.print(to:decnum("1e400"));
+    stdio.print(to:decnum("abc"));
+    stdio.print(to:decnum("-0.5e-3"));
+    stdio.print(or_zero(parse_or_null("12")));
+    stdio.print(or_zero(parse_or_null("x")));
+    z:maybe:32 = 5;
+    stdio.print(z + 1);
+    z = null;
+    stdio.print(z);
+    stdio.print(counter);
+    stdio.print(nothing_yet);
+    c:maybe:32 = counter;
+    if (c != null) {
+        counter = c * 2;
+    }
+    stdio.print(counter);
+    arr:array:maybe:32 = [1, null, 3];
+    stdio.print(arr);
+    b:maybe:bool = true;
+    stdio.print(b);
+    if (b != null and b) {
+        stdio.print("真");
+    }
+    d:maybe:decnum = 2.5;
+    if (d != null) {
+        stdio.print(d * 2);
+    }
+}

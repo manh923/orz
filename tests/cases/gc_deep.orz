@@ -1,0 +1,31 @@
+// exit: 0
+// 深い再帰の途中で GC が動いても、各段の値は消えない
+import stdio;
+
+struct Cell {
+    v:64;
+    s:string;
+}
+
+function 64 down(n:32) {
+    c:Cell = Cell(to:64(n), "段" + to:string(n));
+    if (n % 500 == 0) {
+        i:32 = 0;
+        while (i < 5000) {
+            g:string = "ゴミ" + to:string(i);
+            i = i + 1;
+        }
+    }
+    if (n == 0) {
+        return c.v + to:64(length(c.s));
+    }
+    r:64 = down(n - 1);
+    if (c.s != "段" + to:string(n)) {
+        stdio.print("壊れた");
+    }
+    return r + c.v;
+}
+
+function nothing main() {
+    stdio.print(down(15000));
+}

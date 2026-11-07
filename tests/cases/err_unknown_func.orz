@@ -1,0 +1,4 @@
+// error: `print` という関数はありません
+function nothing main() {
+    print(1);
+}

@@ -1,0 +1,6 @@
+// error: `extern` の関数には中身を書きません
+extern function nothing f(x:32) {
+}
+
+function nothing main() {
+}

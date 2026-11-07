@@ -1,0 +1,7 @@
+// error: 構造体 `Grow` の展開が多すぎます
+struct Grow:T {
+    next:maybe:Grow:array:T;
+}
+
+function nothing main() {
+}

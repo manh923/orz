@@ -1,0 +1,5 @@
+// runtime: 計算の結果が 8 の範囲（0〜255）を超えました
+function nothing main() {
+    u:8 = 1;
+    u = u - 2;
+}

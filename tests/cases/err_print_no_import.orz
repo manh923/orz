@@ -1,0 +1,4 @@
+// error: 表示は `import stdio;` を書いて、`stdio.print(…)` で行います
+function nothing main() {
+    print("x");
+}

@@ -1,0 +1,8 @@
+// error: `+` は `T` には使えません
+// 使われていなくても、定義の時点でエラーになる
+function T twice:T(x:T) {
+    return x + x;
+}
+
+function nothing main() {
+}

@@ -1,0 +1,10 @@
+// error: 関数 `remember` に渡した 1 番目の引数（arena の中で作った値）が、arena の外から届く場所（グローバル変数など）に残されます
+saved:string = "";
+function nothing remember(s:string) {
+    saved = s;
+}
+function nothing main() {
+    arena {
+        remember("a" + "b");
+    }
+}

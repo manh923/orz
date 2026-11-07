@@ -1,0 +1,8 @@
+// runtime: スタックが溢れたか
+function 32 down(n:32) {
+    return down(n + 1) + 1;
+}
+
+function 32 main() {
+    return down(0);
+}

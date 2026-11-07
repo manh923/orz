@@ -1,0 +1,39 @@
+// exit: 0
+import stdio;
+
+function nothing main() {
+    u:8 = 200;
+    stdio.print(u + 55);
+    stdio.print(u / 3);
+    stdio.print(u % 7);
+    stdio.print(u >> 3);
+    stdio.print(u << 1);
+    stdio.print(not u);
+    stdio.print(u xor 255);
+    stdio.print('A' + 1);
+    c:8 = 'z';
+    stdio.print(c);
+    x:64 = 3000000000 * 3;
+    stdio.print(x);
+    stdio.print(x / 7);
+    stdio.print(-x % 7);
+    stdio.print(x >> 1);
+    one:64 = 1;
+    stdio.print(one << 40);
+    big:64 = 1 << 62;
+    stdio.print(big);
+    y:64 = 2;
+    stdio.print(y ^ 62);
+    stdio.print(to:32(u) * 1000);
+    stdio.print(to:64(2147483647) + 1);
+    stdio.print(to:8(255));
+    v:32 = 65;
+    stdio.print(to:8(v));
+    w:64 = -1;
+    stdio.print(to:32(w));
+    stdio.print(to:32(true) + to:32(false));
+    stdio.print(x > to:64(v));
+    stdio.print(u > 199);
+    m:64 = -9223372036854775807 - 1;
+    stdio.print(m);
+}

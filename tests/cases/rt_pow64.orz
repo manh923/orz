@@ -1,0 +1,5 @@
+// runtime: rt_pow64.orz:4: 計算の結果が 64 の範囲
+function nothing main() {
+    x:64 = 2;
+    y:64 = x ^ 63;
+}

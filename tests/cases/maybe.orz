@@ -1,0 +1,65 @@
+// exit: 0
+import stdio;
+
+function maybe:string find(names:array:string, target:string) {
+    i:32 = 0;
+    while (i < length(names)) {
+        if (names[i] == target) {
+            return names[i];
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+function 32 len_or_zero(s:maybe:string) {
+    if (s == null) {
+        return 0;
+    }
+    return length(s);
+}
+
+function nothing main() {
+    names:array:string = ["apple", "banana"];
+    a:maybe:string = find(names, "banana");
+    if (a != null) {
+        stdio.print("見つかった: " + a);
+    }
+    b:maybe:string = find(names, "cherry");
+    stdio.print(b);
+    stdio.print(len_or_zero(b));
+    stdio.print(len_or_zero(a));
+    // and の右辺では、左辺で確かめたことが使える
+    if (a != null and length(a) > 3) {
+        stdio.print("長い");
+    }
+    if (b == null or length(b) == 0) {
+        stdio.print("空か null");
+    }
+    // 入れ直すと、また確かめる必要がある
+    c:maybe:string = "x";
+    stdio.print(length(c));
+    c = null;
+    stdio.print(c);
+    // maybe と string は、中身で比べられる
+    stdio.print(a == "banana");
+    stdio.print(b == "banana");
+    d:maybe:array:32 = [1, 2];
+    if (d != null) {
+        stdio.print(length(d));
+    }
+    stdio.print(d);
+    if (not (d == null)) {
+        stdio.print(d[0]);
+    }
+    // while で順にたどる
+    items:array:maybe:string = ["p", "q", null, "r"];
+    i:32 = 0;
+    cur:maybe:string = items[0];
+    while (cur != null) {
+        stdio.put(cur);
+        i = i + 1;
+        cur = items[i];
+    }
+    stdio.print("");
+}

@@ -1,0 +1,4 @@
+// error: `immutable` はグローバル変数にだけ付けられます
+function nothing main() {
+    immutable X:32 = 1;
+}

@@ -1,0 +1,29 @@
+// exit: 0
+// 標準ライブラリ maps
+import stdio;
+import maps;
+
+function nothing main() {
+    m:maps.Map:32 = maps.new();
+    k:32 = 0;
+    while (k < 1000) {
+        maps.put(m, "key" + to:string(k), k * 2);
+        k = k + 1;
+    }
+    maps.put(m, "key1", -1);
+    stdio.print(maps.count(m));
+    stdio.print(maps.get(m, "key500"));
+    stdio.print(maps.get(m, "key1"));
+    stdio.print(maps.get(m, "nope"));
+    stdio.print(maps.has(m, "key999"));
+    stdio.print(maps.remove(m, "key999"));
+    stdio.print(maps.remove(m, "key999"));
+    stdio.print(maps.has(m, "key999"));
+    stdio.print(maps.count(m));
+    stdio.print(length(maps.keys(m)));
+    names:maps.Map:string = maps.new();
+    maps.put(names, "日本", "にほん");
+    maps.put(names, "", "空");
+    stdio.print(maps.get(names, "日本"));
+    stdio.print(maps.get(names, ""));
+}

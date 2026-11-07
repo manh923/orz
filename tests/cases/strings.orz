@@ -1,0 +1,27 @@
+// exit: 0
+import stdio;
+
+function nothing main() {
+    name:string = "orz";
+    greeting:string = "hello, " + name + "!";
+    stdio.print(greeting);
+    stdio.print(length(greeting));
+    stdio.print(length("日本語"));
+    stdio.print(length(""));
+    stdio.print("" + "" == "");
+    stdio.print("abc" == "ab" + "c");
+    stdio.print("abc" != "abd");
+    stdio.print("ab" == "abc");
+    stdio.print(to:string(-42) + to:string(true) + to:string(false));
+    big:64 = 9223372036854775807;
+    stdio.print(to:string(big));
+    u:8 = 255;
+    stdio.print(to:string(u));
+    b:pointer:8 = bytes("AZ");
+    stdio.print(b[0]);
+    stdio.print(b[1]);
+    stdio.put("a");
+    stdio.put("b\tc");
+    stdio.print("\lb改行の後\n");
+    stdio.print("引用符 \" と \\ と \'");
+}

@@ -1,0 +1,22 @@
+// exit: 0
+import stdio;
+import "modules/collections.orz" as col;
+
+function T id:T(x:T) {
+    return x;
+}
+
+function nothing main() {
+    h:32 = id(4);
+    w:64 = id(5000000000);
+    stdio.print(id(7));
+    stdio.print(h + to:32(w / 1000000000));
+    stdio.print(id("文字"));
+    // ほかのファイルのジェネリクス
+    s:col.Stack:string = col.new_stack:string(4);
+    col.push(s, "a");
+    col.push(s, "b");
+    top:maybe:string = col.pop(s);
+    stdio.print(top);
+    stdio.print(s);
+}

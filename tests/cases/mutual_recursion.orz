@@ -1,0 +1,21 @@
+// exit: 1
+function bool is_even(n:32) {
+    if (n == 0) {
+        return true;
+    }
+    return is_odd(n - 1);
+}
+
+function bool is_odd(n:32) {
+    if (n == 0) {
+        return false;
+    }
+    return is_even(n - 1);
+}
+
+function 32 main() {
+    if (is_even(10) and is_odd(7) and not is_odd(4)) {
+        return 1;
+    }
+    return 0;
+}

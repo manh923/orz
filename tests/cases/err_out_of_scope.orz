@@ -1,0 +1,7 @@
+// error: 変数 `z` はここでは使えません
+function 32 main() {
+    if (true) {
+        z:32 = 1;
+    }
+    return z;
+}

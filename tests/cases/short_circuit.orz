@@ -1,0 +1,24 @@
+// exit: 41
+// and・or・nand・nor は、左辺で結果が決まれば右辺を計算しない
+calls:32 = 0;
+
+function bool touch(v:bool) {
+    calls = calls + 1;
+    return v;
+}
+
+function 32 main() {
+    a:bool = false and touch(true);
+    b:bool = true or touch(false);
+    c:bool = true and touch(true);
+    d:bool = false or touch(false);
+    e:bool = false nand touch(true);
+    f:bool = true nor touch(true);
+    g:bool = true nand touch(true);
+    h:bool = false nor touch(false);
+    r:32 = calls * 10;
+    if (not a and b and c and not d and e and not f and not g and h) {
+        r = r + 1;
+    }
+    return r;
+}

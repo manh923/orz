@@ -1,0 +1,8 @@
+// error: 構造体 `Node` が、maybe を付けずに自分自身を含んでいます
+struct Node {
+    value:32;
+    next:Node;
+}
+
+function nothing main() {
+}

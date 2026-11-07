@@ -1,0 +1,5 @@
+// error: `import` に `< >` は使いません
+import <stdio.orh>;
+
+function nothing main() {
+}

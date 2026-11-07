@@ -1,0 +1,5 @@
+// runtime: シフトの量が 0〜31
+// flags: --no-fold
+function 32 main() {
+    return 1 << (0 - 1);
+}

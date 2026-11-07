@@ -1,0 +1,14 @@
+// imports.orz から使う。counter.orz とお互いに import し合っている。
+import "counter.orz";
+
+export immutable ORIGIN_NAME:string = "原点";
+
+export struct Point {
+    x:32;
+    y:32;
+}
+
+export function 32 dist2(p:Point) {
+    counter.bump();
+    return p.x * p.x + p.y * p.y;
+}

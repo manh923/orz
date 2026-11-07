@@ -1,0 +1,5 @@
+// error: 符号の `-` は `bool` には使えません
+function nothing main() {
+    b:bool = true;
+    c:bool = -b;
+}

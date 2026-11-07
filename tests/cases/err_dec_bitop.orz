@@ -1,0 +1,4 @@
+// error: `<<` は `decnum` には使えません
+function nothing main() {
+    d:decnum = 1.5 << 2;
+}

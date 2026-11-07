@@ -1,0 +1,4 @@
+// error: コンパイル時にわかる誤り：0 で割りました
+function nothing main() {
+    d:decnum = 1.5 / 0.0;
+}

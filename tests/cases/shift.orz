@@ -1,0 +1,5 @@
+// exit: 6
+// >> は符号を保つ
+function 32 main() {
+    return (-16 >> 2) + 10;
+}

@@ -1,0 +1,19 @@
+// exit: 162
+// immutable は後ろで宣言したものも使える
+immutable H:32 = W * 2;
+immutable W:32 = 80;
+count:32 = H - 100;
+immutable DEBUG:bool = W > 10 and not false;
+
+function nothing bump() {
+    count = count + 1;
+}
+
+function 32 main() {
+    bump();
+    bump();
+    if (DEBUG) {
+        count = count + 100;
+    }
+    return count;
+}

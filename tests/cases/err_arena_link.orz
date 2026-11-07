@@ -1,0 +1,9 @@
+// error: 関数 `link` に渡した 2 番目の引数
+struct Node { name:string; next:maybe:Node; }
+function nothing link(a:Node, b:Node) { a.next = b; }
+function nothing main() {
+    head:Node = Node("h", null);
+    arena {
+        link(head, Node("x", null));
+    }
+}

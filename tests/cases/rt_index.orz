@@ -1,0 +1,8 @@
+// runtime: rt_index.orz:7: 配列の範囲外です（添字 -1、長さ 3）
+import stdio;
+
+function nothing main() {
+    a:array:32 = [1, 2, 3];
+    i:32 = -1;
+    stdio.print(a[i]);
+}

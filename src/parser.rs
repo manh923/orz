@@ -1,0 +1,925 @@
+//! 構文解析。トークンの列を構文木にする。
+
+use crate::ast::*;
+use crate::lexer::{Kw, Tok, Token};
+use crate::source::{Diag, Span};
+
+pub fn parse(tokens: Vec<Token>) -> Result<Program, Diag> {
+    let mut p = Parser { tokens, pos: 0 };
+    let mut items = Vec::new();
+    while p.peek() != &Tok::Eof {
+        items.push(p.item()?);
+    }
+    Ok(Program { items })
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+type PResult<T> = Result<T, Diag>;
+
+impl Parser {
+    fn peek(&self) -> &Tok {
+        &self.tokens[self.pos].tok
+    }
+
+    fn peek_at(&self, n: usize) -> &Tok {
+        let i = (self.pos + n).min(self.tokens.len() - 1);
+        &self.tokens[i].tok
+    }
+
+    fn span(&self) -> Span {
+        self.tokens[self.pos].span
+    }
+
+    fn prev_span(&self) -> Span {
+        self.tokens[self.pos.saturating_sub(1)].span
+    }
+
+    fn bump(&mut self) -> Token {
+        let t = self.tokens[self.pos].clone();
+        if self.pos < self.tokens.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn eat(&mut self, tok: &Tok) -> bool {
+        if self.peek() == tok {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, tok: Tok, what: &str) -> PResult<Span> {
+        if self.peek() == &tok {
+            Ok(self.bump().span)
+        } else {
+            Err(self.unexpected(&format!("{} `{}`", what, tok.punct_str())))
+        }
+    }
+
+    /// 期待と違うトークンがあった。
+    fn unexpected(&self, expected: &str) -> Diag {
+        let d = Diag::new(
+            self.span(),
+            format!("{}が必要ですが、{}があります", expected, self.peek().describe()),
+        );
+        // `;` の書き忘れは、次の行の頭でエラーになることが多い。
+        if expected.contains('`') && expected.contains(';') {
+            d.hint("前の行の終わりに `;` を書き忘れていませんか")
+        } else {
+            d
+        }
+    }
+
+    fn ident(&mut self, what: &str) -> PResult<(String, Span)> {
+        match self.peek().clone() {
+            Tok::Ident(name) => Ok((name, self.bump().span)),
+            Tok::Kw(k) => Err(Diag::new(
+                self.span(),
+                format!("`{}` はキーワードなので、{}には使えません", k.as_str(), what),
+            )),
+            _ => Err(self.unexpected(what)),
+        }
+    }
+
+    // ---------------- トップレベル ----------------
+
+    fn item(&mut self) -> PResult<Item> {
+        let exported = self.eat(&Tok::Kw(Kw::Export));
+        let mut item = match self.peek() {
+            Tok::Kw(Kw::Function) => Item::Func(self.func()?),
+            Tok::Ident(_) => Item::Global(self.decl(false)?),
+            Tok::Kw(Kw::Struct) => Item::Struct(self.struct_def()?),
+            Tok::Kw(Kw::Import) if exported => {
+                return Err(Diag::new(self.span(), "`import` に `export` は付けられません"))
+            }
+            Tok::Kw(Kw::Import) => Item::Import(self.import()?),
+            Tok::Kw(Kw::Export) => return Err(Diag::new(self.span(), "`export` が 2 つ続いています")),
+            Tok::Kw(Kw::Extern) => {
+                self.bump();
+                if self.peek() != &Tok::Kw(Kw::Function) {
+                    return Err(Diag::new(self.span(), "`extern` の後には `function` を書きます")
+                        .hint("例：extern function 64 orz_rt_run(args:array:string);"));
+                }
+                Item::Func(self.func_with(true)?)
+            }
+            Tok::Kw(Kw::Immutable) => {
+                self.bump();
+                Item::Global(self.decl(true)?)
+            }
+            _ => return Err(self.unexpected("関数（`function`）、構造体（`struct`）、グローバル変数の宣言")),
+        };
+        match &mut item {
+            Item::Func(f) => f.exported = exported,
+            Item::Global(d) => d.exported = exported,
+            Item::Struct(s) => s.exported = exported,
+            Item::Import(_) => {}
+        }
+        Ok(item)
+    }
+
+    fn struct_def(&mut self) -> PResult<StructDef> {
+        self.bump(); // struct
+        let (name, name_span) = self.ident("構造体の名前")?;
+        let type_params = self.type_params()?;
+        self.expect(Tok::LBrace, "構造体の始まりの")?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(
+                    Diag::new(self.span(), "`}` が足りません").hint("構造体を `}` で閉じ忘れていませんか")
+                );
+            }
+            let (fname, fspan) = self.ident("フィールドの名前")?;
+            if self.peek() != &Tok::Colon {
+                return Err(
+                    Diag::new(self.span(), format!("フィールド `{}` の型がありません", fname))
+                        .hint(format!("`{}:32;` のように `:` と型を書きます", fname)),
+                );
+            }
+            self.bump();
+            let ty = self.type_expr()?;
+            if self.peek() == &Tok::Assign {
+                return Err(Diag::new(self.span(), "フィールドには初期値を書けません")
+                    .hint("値は、構造体を作るとき（`Point(1, 2)`）に渡します"));
+            }
+            self.semi()?;
+            fields.push(FieldDef {
+                name: fname,
+                ty,
+                span: fspan,
+            });
+        }
+        self.bump(); // }
+        Ok(StructDef {
+            name,
+            name_span,
+            fields,
+            exported: false,
+            type_params,
+        })
+    }
+
+    fn import(&mut self) -> PResult<Import> {
+        let lo = self.bump().span; // import
+        let target = match self.peek().clone() {
+            Tok::Ident(name) => {
+                self.bump();
+                ImportTarget::Std(name)
+            }
+            Tok::Str(path) => {
+                self.bump();
+                ImportTarget::File(String::from_utf8_lossy(&path).into_owned())
+            }
+            Tok::Lt => {
+                return Err(Diag::new(self.span(), "`import` に `< >` は使いません")
+                    .hint("標準ライブラリは `import stdio;` のように、名前だけを書きます"))
+            }
+            _ => {
+                return Err(self
+                    .unexpected("標準ライブラリの名前か、\"ファイル名.orz\"")
+                    .hint("例：import stdio;  import \"util.orz\";"))
+            }
+        };
+        let alias = if self.eat(&Tok::Kw(Kw::As)) {
+            Some(self.ident("名前空間の名前")?.0)
+        } else {
+            None
+        };
+        self.semi()?;
+        Ok(Import {
+            target,
+            alias,
+            resolved: None,
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    fn func(&mut self) -> PResult<Func> {
+        self.func_with(false)
+    }
+
+    /// 関数の定義。`is_extern` なら中身の代わりに `;` で終わる。
+    fn func_with(&mut self, is_extern: bool) -> PResult<Func> {
+        self.bump(); // function
+        if self.peek() == &Tok::Colon {
+            return Err(
+                Diag::new(self.span(), "`function` の直後の戻り値の型には `:` を付けません")
+                    .hint("例：function 32 add(a:32, b:32) { ... }"),
+            );
+        }
+        if let Tok::Ident(_) = self.peek() {
+            // `function add(...)` のように戻り値の型を書き忘れた。
+            if matches!(self.peek_at(1), Tok::LParen | Tok::Colon) && !self.ret_type_ahead() {
+                return Err(Diag::new(self.span(), "関数の戻り値の型がありません")
+                    .hint("値を返さないなら `function nothing 名前(...)` と書きます"));
+            }
+        }
+        let ret = self.ret_type()?;
+        let (name, name_span) = self.ident("関数の名前")?;
+        let type_params = self.type_params()?;
+        self.expect(Tok::LParen, "引数の始まりの")?;
+        let mut params = Vec::new();
+        if !self.eat(&Tok::RParen) {
+            loop {
+                let (pname, pspan) = self.ident("引数の名前")?;
+                if self.peek() != &Tok::Colon {
+                    return Err(
+                        Diag::new(self.span(), format!("引数 `{}` の型がありません", pname))
+                            .hint(format!("`{}:32` のように `:` と型を書いてください", pname)),
+                    );
+                }
+                self.bump();
+                let ty = self.type_expr()?;
+                params.push(Param {
+                    name: pname,
+                    span: pspan.to(ty.span),
+                    ty,
+                });
+                if self.eat(&Tok::Comma) {
+                    continue;
+                }
+                self.expect(Tok::RParen, "引数の終わりの")?;
+                break;
+            }
+        }
+        let body = if is_extern {
+            if self.peek() == &Tok::LBrace {
+                return Err(Diag::new(self.span(), "`extern` の関数には中身を書きません")
+                    .hint("中身はランタイムや C の側にあります。`;` で終えます"));
+            }
+            let close = self.span();
+            self.semi()?;
+            Block {
+                stmts: Vec::new(),
+                close,
+            }
+        } else {
+            self.block()?
+        };
+        Ok(Func {
+            name,
+            name_span,
+            ret,
+            params,
+            body,
+            exported: false,
+            type_params,
+            is_extern,
+        })
+    }
+
+    fn ret_type(&mut self) -> PResult<RetType> {
+        if self.peek() == &Tok::Kw(Kw::Nothing) {
+            return Ok(RetType::Nothing(self.bump().span));
+        }
+        Ok(RetType::Type(self.type_expr()?))
+    }
+
+    // ---------------- 型 ----------------
+
+    /// 型。`:` で続くものはすべて並べて読む（区切りは意味解析で決める）。
+    fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let lo = self.span();
+        let mut atoms = vec![self.type_atom()?];
+        while self.peek() == &Tok::Colon && can_start_type(self.peek_at(1)) {
+            self.bump();
+            atoms.push(self.type_atom()?);
+        }
+        Ok(TypeExpr {
+            atoms,
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    fn type_atom(&mut self) -> PResult<TypeAtom> {
+        let lo = self.span();
+        let kind = match self.peek().clone() {
+            Tok::Int(8) => {
+                self.bump();
+                AtomKind::Int(IntTy::U8)
+            }
+            Tok::Int(32) => {
+                self.bump();
+                AtomKind::Int(IntTy::I32)
+            }
+            Tok::Int(64) => {
+                self.bump();
+                AtomKind::Int(IntTy::I64)
+            }
+            Tok::Int(n) => {
+                return Err(Diag::new(lo, format!("`{}` という型はありません", n))
+                    .hint("整数の型は `8`、`32`、`64` です"))
+            }
+            Tok::Kw(Kw::Bool) => {
+                self.bump();
+                AtomKind::Bool
+            }
+            Tok::Kw(Kw::Decnum) => {
+                self.bump();
+                AtomKind::Decnum
+            }
+            Tok::Kw(Kw::String) => {
+                self.bump();
+                AtomKind::String
+            }
+            Tok::Kw(Kw::Address) => {
+                self.bump();
+                AtomKind::Address
+            }
+            Tok::Kw(k @ (Kw::Pointer | Kw::Array | Kw::Maybe)) => {
+                self.bump();
+                if self.peek() != &Tok::Colon || !can_start_type(self.peek_at(1)) {
+                    return Err(Diag::new(
+                        self.span(),
+                        format!("`{}` の後に `:` と型が必要です", k.as_str()),
+                    )
+                    .hint(format!("例：{}:32", k.as_str())));
+                }
+                match k {
+                    Kw::Pointer => AtomKind::Pointer,
+                    Kw::Array => AtomKind::Array,
+                    _ => AtomKind::Maybe,
+                }
+            }
+            Tok::Kw(Kw::Function) => {
+                self.bump();
+                self.expect(Tok::Colon, "`function` の後に")?;
+                let ret = self.ret_type()?;
+                self.expect(Tok::LParen, "引数の型の始まりの")?;
+                let mut params = Vec::new();
+                if !self.eat(&Tok::RParen) {
+                    loop {
+                        params.push(self.type_expr()?);
+                        if self.eat(&Tok::Comma) {
+                            continue;
+                        }
+                        self.expect(Tok::RParen, "引数の型の終わりの")?;
+                        break;
+                    }
+                }
+                AtomKind::Function(Box::new(ret), params)
+            }
+            Tok::Ident(name) => {
+                self.bump();
+                // `util.Point` のように、名前空間の付いた構造体の名前。
+                if self.eat(&Tok::Dot) {
+                    let (inner, _) = self.ident("構造体の名前")?;
+                    AtomKind::Named(Some(name), inner)
+                } else {
+                    AtomKind::Named(None, name)
+                }
+            }
+            _ => return Err(self.unexpected("型")),
+        };
+        Ok(TypeAtom {
+            kind,
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    /// 名前の後ろの `:T:U`（ジェネリクスの型引数の名前）。
+    fn type_params(&mut self) -> PResult<Vec<String>> {
+        let mut params = Vec::new();
+        while self.eat(&Tok::Colon) {
+            let (name, span) = self.ident("型引数の名前")?;
+            if params.contains(&name) {
+                return Err(Diag::new(span, format!("型引数 `{}` が 2 つあります", name)));
+            }
+            params.push(name);
+        }
+        Ok(params)
+    }
+
+    // ---------------- 文 ----------------
+
+    fn block(&mut self) -> PResult<Block> {
+        self.expect(Tok::LBrace, "ブロックの始まりの")?;
+        let mut stmts = Vec::new();
+        loop {
+            match self.peek() {
+                Tok::RBrace => break,
+                Tok::Eof => {
+                    return Err(Diag::new(self.span(), "`}` が足りません")
+                        .hint("ブロックを `}` で閉じ忘れていませんか"))
+                }
+                _ => stmts.push(self.stmt()?),
+            }
+        }
+        let close = self.bump().span;
+        Ok(Block { stmts, close })
+    }
+
+    fn semi(&mut self) -> PResult<Span> {
+        self.expect(Tok::Semi, "文の終わりの")
+    }
+
+    fn decl(&mut self, immutable: bool) -> PResult<Decl> {
+        let (name, name_span) = self.ident("変数の名前")?;
+        if self.peek() != &Tok::Colon {
+            return Err(
+                Diag::new(self.span(), format!("変数 `{}` の型がありません", name))
+                    .hint(format!("宣言は `{}:32 = 値;` のように `:` と型を書きます", name)),
+            );
+        }
+        self.bump();
+        let ty = self.type_expr()?;
+        if self.peek() == &Tok::Semi {
+            return Err(
+                Diag::new(self.span(), format!("変数 `{}` に初期値がありません", name))
+                    .hint(format!("`{}:... = 値;` のように初期値を書いてください", name)),
+            );
+        }
+        self.expect(Tok::Assign, "初期値の")?;
+        let init = self.expr()?;
+        self.semi()?;
+        Ok(Decl {
+            name,
+            name_span,
+            ty,
+            init,
+            immutable,
+            exported: false,
+        })
+    }
+
+    fn stmt(&mut self) -> PResult<Stmt> {
+        let lo = self.span();
+        let decl_ahead = matches!(self.peek(), Tok::Ident(_))
+            && self.peek_at(1) == &Tok::Colon
+            && !self.generic_call_ahead();
+        let kind = match self.peek() {
+            Tok::Ident(_) if decl_ahead => StmtKind::Decl(self.decl(false)?),
+            Tok::Kw(Kw::Immutable) => {
+                return Err(Diag::new(lo, "`immutable` はグローバル変数にだけ付けられます")
+                    .hint("関数の外（ファイルのいちばん外側）で宣言してください"))
+            }
+            Tok::Kw(Kw::If) => return self.if_stmt(),
+            Tok::Kw(Kw::While) => {
+                self.bump();
+                let cond = self.cond("while")?;
+                let body = self.block()?;
+                StmtKind::While { cond, body }
+            }
+            Tok::Kw(Kw::Break) => {
+                self.bump();
+                self.semi()?;
+                StmtKind::Break
+            }
+            Tok::Kw(Kw::Continue) => {
+                self.bump();
+                self.semi()?;
+                StmtKind::Continue
+            }
+            Tok::Kw(Kw::Return) => {
+                self.bump();
+                if self.eat(&Tok::Semi) {
+                    StmtKind::Return(None)
+                } else {
+                    let e = self.expr()?;
+                    self.semi()?;
+                    StmtKind::Return(Some(e))
+                }
+            }
+            Tok::Kw(Kw::Arena) => {
+                self.bump();
+                StmtKind::Arena(self.block()?)
+            }
+            Tok::Kw(Kw::Function) => {
+                return Err(Diag::new(lo, "関数の中に関数は書けません")
+                    .hint("関数はファイルのいちばん外側に書きます"))
+            }
+            _ => {
+                let e = self.expr()?;
+                if self.eat(&Tok::Assign) {
+                    let value = self.expr()?;
+                    self.semi()?;
+                    StmtKind::Assign { target: e, value }
+                } else {
+                    self.semi()?;
+                    StmtKind::Expr(e)
+                }
+            }
+        };
+        Ok(Stmt {
+            kind,
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    /// `function` の後ろが「型 名前」の形か（`function T get:T(…)` なら真、`function get:T(…)` なら偽）。
+    fn ret_type_ahead(&mut self) -> bool {
+        let save = self.pos;
+        let ok = self.type_expr().is_ok() && matches!(self.peek(), Tok::Ident(_));
+        self.pos = save;
+        ok
+    }
+
+    /// 文の先頭の `名前:型` の後ろが `(` なら、宣言ではなく `get:32(…)` という呼び出し。
+    fn generic_call_ahead(&mut self) -> bool {
+        let save = self.pos;
+        self.bump();
+        self.bump();
+        let ok = self.type_expr().is_ok() && self.peek() == &Tok::LParen;
+        self.pos = save;
+        ok
+    }
+
+    /// `if` や `while` の `( 条件 )`。
+    fn cond(&mut self, kw: &str) -> PResult<Expr> {
+        if self.peek() != &Tok::LParen {
+            return Err(
+                Diag::new(self.span(), format!("`{}` の条件は `()` で囲みます", kw))
+                    .hint(format!("例：{} (x > 3) {{ ... }}", kw)),
+            );
+        }
+        self.bump();
+        let e = self.expr()?;
+        if self.peek() == &Tok::Assign {
+            return Err(Diag::new(self.span(), "条件の中に `=`（代入）は書けません")
+                .hint("等しいかを比べるときは `==` と書きます"));
+        }
+        self.expect(Tok::RParen, "条件の終わりの")?;
+        Ok(e)
+    }
+
+    fn if_stmt(&mut self) -> PResult<Stmt> {
+        let lo = self.bump().span; // if
+        let cond = self.cond("if")?;
+        let then = self.block()?;
+        let els = if self.eat(&Tok::Kw(Kw::Else)) {
+            if self.peek() == &Tok::Kw(Kw::If) {
+                Some(Else::If(Box::new(self.if_stmt()?)))
+            } else {
+                Some(Else::Block(self.block()?))
+            }
+        } else {
+            None
+        };
+        Ok(Stmt {
+            kind: StmtKind::If { cond, then, els },
+            span: lo.to(self.prev_span()),
+        })
+    }
+
+    // ---------------- 式 ----------------
+    //
+    // 優先順位（上ほど先に計算する）
+    //   1  ()
+    //   2  ^（右結合）
+    //   3  not、符号の -
+    //   4  * / %
+    //   5  + -
+    //   6  << >>
+    //   7  < > <= >= == !=
+    //   8  and nand
+    //   9  xor xnor
+    //  10  or nor
+
+    pub fn expr(&mut self) -> PResult<Expr> {
+        self.binary(10)
+    }
+
+    fn binop_at(&self, level: u8) -> Option<BinOp> {
+        let op = match (level, self.peek()) {
+            (10, Tok::Kw(Kw::Or)) => BinOp::Or,
+            (10, Tok::Kw(Kw::Nor)) => BinOp::Nor,
+            (9, Tok::Kw(Kw::Xor)) => BinOp::Xor,
+            (9, Tok::Kw(Kw::Xnor)) => BinOp::Xnor,
+            (8, Tok::Kw(Kw::And)) => BinOp::And,
+            (8, Tok::Kw(Kw::Nand)) => BinOp::Nand,
+            (7, Tok::Lt) => BinOp::Lt,
+            (7, Tok::Gt) => BinOp::Gt,
+            (7, Tok::Le) => BinOp::Le,
+            (7, Tok::Ge) => BinOp::Ge,
+            (7, Tok::EqEq) => BinOp::Eq,
+            (7, Tok::Ne) => BinOp::Ne,
+            (6, Tok::Shl) => BinOp::Shl,
+            (6, Tok::Shr) => BinOp::Shr,
+            (5, Tok::Plus) => BinOp::Add,
+            (5, Tok::Minus) => BinOp::Sub,
+            (4, Tok::Star) => BinOp::Mul,
+            (4, Tok::Slash) => BinOp::Div,
+            (4, Tok::Percent) => BinOp::Mod,
+            _ => return None,
+        };
+        Some(op)
+    }
+
+    /// 順位 4〜10 の左結合の二項演算子。
+    fn binary(&mut self, level: u8) -> PResult<Expr> {
+        if level == 3 {
+            return self.unary();
+        }
+        let mut lhs = self.binary(level - 1)?;
+        while let Some(op) = self.binop_at(level) {
+            self.bump();
+            let rhs = self.binary(level - 1)?;
+            let span = lhs.span.to(rhs.span);
+            lhs = Expr {
+                kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// 順位 3：`not`、符号の `-`。
+    fn unary(&mut self) -> PResult<Expr> {
+        let lo = self.span();
+        let op = match self.peek() {
+            Tok::Kw(Kw::Not) => UnOp::Not,
+            Tok::Minus => UnOp::Neg,
+            _ => return self.power(),
+        };
+        self.bump();
+        let e = self.unary()?;
+        let span = lo.to(e.span);
+        Ok(Expr {
+            kind: ExprKind::Unary(op, Box::new(e)),
+            span,
+        })
+    }
+
+    /// 順位 2：`^`（右結合）。`-2^2` は `-(2^2)`、`2^-1` は `2^(-1)`。
+    fn power(&mut self) -> PResult<Expr> {
+        let base = self.postfix()?;
+        if self.eat(&Tok::Caret) {
+            let exp = self.unary()?;
+            let span = base.span.to(exp.span);
+            return Ok(Expr {
+                kind: ExprKind::Binary(BinOp::Pow, Box::new(base), Box::new(exp)),
+                span,
+            });
+        }
+        Ok(base)
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let mut e = self.primary()?;
+        loop {
+            match self.peek() {
+                // `get:32(…)`、`List:32(…)`：型を付けた関数・構造体の名前。
+                Tok::Colon
+                    if matches!(e.kind, ExprKind::Var(_) | ExprKind::Field(..))
+                        && can_start_type(self.peek_at(1)) =>
+                {
+                    self.bump();
+                    let ty = self.type_expr()?;
+                    let span = e.span.to(ty.span);
+                    e = Expr {
+                        kind: ExprKind::Generic(Box::new(e), ty),
+                        span,
+                    };
+                }
+                Tok::LParen => {
+                    self.bump();
+                    let args = self.args(Tok::RParen)?;
+                    let span = e.span.to(self.prev_span());
+                    e = Expr {
+                        kind: ExprKind::Call(Box::new(e), args),
+                        span,
+                    };
+                }
+                Tok::LBracket => {
+                    self.bump();
+                    let idx = self.expr()?;
+                    self.expect(Tok::RBracket, "添字の終わりの")?;
+                    let span = e.span.to(self.prev_span());
+                    e = Expr {
+                        kind: ExprKind::Index(Box::new(e), Box::new(idx)),
+                        span,
+                    };
+                }
+                Tok::Dot => {
+                    self.bump();
+                    let (name, nspan) = self.ident("フィールドの名前")?;
+                    let span = e.span.to(nspan);
+                    e = Expr {
+                        kind: ExprKind::Field(Box::new(e), name),
+                        span,
+                    };
+                }
+                _ => return Ok(e),
+            }
+        }
+    }
+
+    /// `,` で区切った式の並び。閉じ記号まで読む。
+    fn args(&mut self, close: Tok) -> PResult<Vec<Expr>> {
+        let mut args = Vec::new();
+        if self.eat(&close) {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.expr()?);
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            let what = if close == Tok::RParen {
+                "引数の終わりの"
+            } else {
+                "配列の終わりの"
+            };
+            self.expect(close, what)?;
+            return Ok(args);
+        }
+    }
+
+    fn primary(&mut self) -> PResult<Expr> {
+        let lo = self.span();
+        let kind = match self.peek().clone() {
+            Tok::Int(n) => {
+                self.bump();
+                ExprKind::Int(n)
+            }
+            Tok::Float(f) => {
+                self.bump();
+                ExprKind::Float(f)
+            }
+            Tok::Str(s) => {
+                self.bump();
+                ExprKind::Str(s)
+            }
+            Tok::Char(c) => {
+                self.bump();
+                ExprKind::Char(c)
+            }
+            Tok::Kw(Kw::True) => {
+                self.bump();
+                ExprKind::Bool(true)
+            }
+            Tok::Kw(Kw::False) => {
+                self.bump();
+                ExprKind::Bool(false)
+            }
+            Tok::Kw(Kw::Null) => {
+                self.bump();
+                ExprKind::Null
+            }
+            Tok::Ident(name)
+                if name == "size" && self.peek_at(1) == &Tok::LParen && self.peek_at(2) == &Tok::Colon =>
+            {
+                self.bump();
+                self.bump();
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(Tok::RParen, "`size` の終わりの")?;
+                ExprKind::SizeOf(ty)
+            }
+            Tok::Ident(name) => {
+                self.bump();
+                ExprKind::Var(name)
+            }
+            Tok::LParen => {
+                self.bump();
+                let e = self.expr()?;
+                self.expect(Tok::RParen, "かっこを閉じる")?;
+                return Ok(Expr {
+                    kind: e.kind,
+                    span: lo.to(self.prev_span()),
+                });
+            }
+            Tok::LBracket => {
+                self.bump();
+                ExprKind::ArrayLit(self.args(Tok::RBracket)?)
+            }
+            Tok::Kw(Kw::To) => {
+                self.bump();
+                if self.peek() != &Tok::Colon {
+                    return Err(Diag::new(self.span(), "`to` の後に `:` と型が必要です").hint("例：to:32(x)"));
+                }
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(Tok::LParen, "変換する値の")?;
+                let e = self.expr()?;
+                self.expect(Tok::RParen, "変換の終わりの")?;
+                ExprKind::Convert(ty, Box::new(e))
+            }
+            Tok::Kw(Kw::Array) if self.peek_at(1) == &Tok::LParen => {
+                self.bump();
+                self.bump();
+                let n = self.expr()?;
+                let init = if self.eat(&Tok::Comma) {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
+                self.expect(Tok::RParen, "`array` の終わりの")?;
+                ExprKind::ArrayNew(Box::new(n), init)
+            }
+            _ => return Err(self.unexpected("式")),
+        };
+        Ok(Expr {
+            kind,
+            span: lo.to(self.prev_span()),
+        })
+    }
+}
+
+/// 型の始まりになれるトークンか。
+fn can_start_type(t: &Tok) -> bool {
+    matches!(
+        t,
+        Tok::Int(_)
+            | Tok::Ident(_)
+            | Tok::Kw(
+                Kw::Bool
+                    | Kw::Decnum
+                    | Kw::String
+                    | Kw::Address
+                    | Kw::Pointer
+                    | Kw::Array
+                    | Kw::Maybe
+                    | Kw::Function
+            )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    fn parse_src(s: &str) -> Result<Program, Diag> {
+        parse(lex(s, 0).unwrap().tokens)
+    }
+
+    fn ret_expr(src: &str) -> String {
+        let p = parse_src(&format!("function 32 main() {{ return {}; }}", src)).unwrap();
+        let Item::Func(f) = &p.items[0] else { panic!() };
+        let StmtKind::Return(Some(e)) = &f.body.stmts[0].kind else {
+            panic!()
+        };
+        show(e)
+    }
+
+    fn show(e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Int(n) => n.to_string(),
+            ExprKind::Var(v) => v.clone(),
+            ExprKind::Unary(UnOp::Neg, x) => format!("(-{})", show(x)),
+            ExprKind::Unary(UnOp::Not, x) => format!("(not {})", show(x)),
+            ExprKind::Binary(op, a, b) => format!("({} {} {})", show(a), op.as_str(), show(b)),
+            _ => "?".into(),
+        }
+    }
+
+    #[test]
+    fn precedence() {
+        assert_eq!(ret_expr("1 + 2 * 3"), "(1 + (2 * 3))");
+        assert_eq!(ret_expr("-2 ^ 2"), "(-(2 ^ 2))");
+        assert_eq!(ret_expr("2 ^ 3 ^ 2"), "(2 ^ (3 ^ 2))");
+        assert_eq!(ret_expr("2 ^ -1"), "(2 ^ (-1))");
+        assert_eq!(ret_expr("1 - 2 - 3"), "((1 - 2) - 3)");
+        assert_eq!(ret_expr("a or b and c"), "(a or (b and c))");
+        assert_eq!(ret_expr("a xor b or c"), "((a xor b) or c)");
+        assert_eq!(ret_expr("1 << 2 + 3"), "(1 << (2 + 3))");
+        assert_eq!(ret_expr("not a < b"), "((not a) < b)");
+    }
+
+    #[test]
+    fn newlines_free() {
+        assert!(parse_src("function nothing main() { x :\n32\n= add(1,2)\n; }").is_ok());
+    }
+
+    #[test]
+    fn errors() {
+        let e = parse_src("function 32 main() { return 1\n}").unwrap_err();
+        assert!(e.msg.contains("`;`"));
+        assert!(parse_src("function nothing main() { if x > 3 { } }")
+            .unwrap_err()
+            .msg
+            .contains("()"));
+        assert!(parse_src("function nothing main() { x:32; }")
+            .unwrap_err()
+            .msg
+            .contains("初期値"));
+        assert!(parse_src("function main() { }")
+            .unwrap_err()
+            .msg
+            .contains("戻り値の型"));
+        assert!(parse_src("function :32 main() { }").is_err());
+    }
+
+    #[test]
+    fn types() {
+        let p = parse_src(
+            "function pointer:pointer:32 f(a:array:maybe:string, g:function:32(32, 8)) { return a; }",
+        )
+        .unwrap();
+        let Item::Func(f) = &p.items[0] else { panic!() };
+        assert_eq!(f.params.len(), 2);
+    }
+
+    #[test]
+    fn else_if() {
+        assert!(parse_src("function nothing main() { if (a) { } else if (b) { } else { } }").is_ok());
+    }
+}

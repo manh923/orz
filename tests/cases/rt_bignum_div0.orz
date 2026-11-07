@@ -1,0 +1,9 @@
+// runtime: 0 で割りました
+// bignum も、整数と同じく 0 で割ると止まる
+import bignum;
+
+function nothing main() {
+    a:bignum.Big = bignum.from(10);
+    zero:bignum.Big = bignum.sub(a, a);
+    b:bignum.Big = bignum.div(a, zero);
+}

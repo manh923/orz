@@ -1,0 +1,5 @@
+// runtime: 0 で割りました
+function nothing main() {
+    x:decnum = -0.0;
+    y:decnum = 1.0 % x;
+}

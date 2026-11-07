@@ -1,0 +1,4 @@
+// error: `+` は `bool` には使えません
+function nothing main() {
+    b:bool = true + false;
+}

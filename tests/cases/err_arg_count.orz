@@ -1,0 +1,8 @@
+// error: 関数 `add` の引数は 2 個ですが、1 個書かれています
+function 32 add(a:32, b:32) {
+    return a + b;
+}
+
+function 32 main() {
+    return add(1);
+}

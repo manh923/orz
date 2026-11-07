@@ -1,0 +1,4 @@
+// error: `;` を書き忘れていませんか
+function 32 main() {
+    return 1
+}

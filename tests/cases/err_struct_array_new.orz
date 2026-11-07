@@ -1,0 +1,8 @@
+// error: `array:Point` は `array(n)` では作れません
+struct Point {
+    x:32;
+}
+
+function nothing main() {
+    a:array:Point = array(3);
+}

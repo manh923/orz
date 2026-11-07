@@ -1,0 +1,7 @@
+// error: `T` 型の値は比べられません
+function bool lt:T(a:T, b:T) {
+    return a < b;
+}
+
+function nothing main() {
+}

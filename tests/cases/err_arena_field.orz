@@ -1,0 +1,8 @@
+// error: arena の中で作った値を、arena の外で作ったもの（構造体・配列など）の中に入れています
+struct P { name:string; }
+function nothing main() {
+    p:P = P("x");
+    arena {
+        p.name = "a" + "b";
+    }
+}

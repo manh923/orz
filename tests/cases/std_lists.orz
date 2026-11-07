@@ -1,0 +1,44 @@
+// exit: 0
+// 標準ライブラリ lists
+import stdio;
+import lists;
+
+struct Token {
+    kind:32;
+    text:string;
+}
+
+function nothing main() {
+    l:lists.List:Token = lists.new();
+    lists.push(l, Token(1, "function"));
+    lists.push(l, Token(2, "main"));
+    i:32 = 0;
+    while (i < 100) {
+        lists.push(l, Token(3, to:string(i)));
+        i = i + 1;
+    }
+    stdio.print(lists.count(l));
+    stdio.print(lists.get(l, 1));
+    t:Token = lists.pop(l);
+    stdio.print(t.text);
+    stdio.print(lists.count(l));
+    nums:lists.List:32 = lists.new();
+    lists.push(nums, 5);
+    lists.push(nums, 7);
+    lists.set(nums, 0, 6);
+    stdio.print(lists.to_array(nums));
+    lists.clear(nums);
+    stdio.print(lists.to_array(nums));
+    // arena の中で作ったリストは、arena の中で使える
+    n:32 = 0;
+    arena {
+        words:lists.List:string = lists.new();
+        j:32 = 0;
+        while (j < 50) {
+            lists.push(words, "w" + to:string(j));
+            j = j + 1;
+        }
+        n = lists.count(words);
+    }
+    stdio.print(n);
+}

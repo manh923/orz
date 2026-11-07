@@ -1,0 +1,10 @@
+// error: 関数 `push:string` が中で作る値（ここで呼ぶと arena の中にできます）が、1 番目の引数（それより外で作ったもの）の中に入れられます
+// arena の外のリストに arena の中で足すと、広げた配列が arena の中にできてしまう
+import lists;
+
+function nothing main() {
+    outer:lists.List:string = lists.new();
+    arena {
+        lists.push(outer, "a");
+    }
+}

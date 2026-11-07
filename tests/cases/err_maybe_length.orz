@@ -1,0 +1,7 @@
+// error: `maybe:string` 型の値には、null でないことを確かめるまで `length` は使えません
+import stdio;
+
+function nothing main() {
+    s:maybe:string = stdio.read_line();
+    stdio.print(length(s));
+}

@@ -1,0 +1,4 @@
+// error: `null` は `maybe` の付いた型にだけ入れられます
+function nothing main() {
+    s:string = null;
+}
