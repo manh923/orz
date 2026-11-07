@@ -12,7 +12,7 @@ function 32 main() {
 
 ## 今できること
 
-実装の手順 1〜7 まで。
+実装の手順 1〜8 まで（全部）。
 
 ```
 import stdio;
@@ -50,6 +50,7 @@ function nothing main() {
 - グローバル変数と `immutable`
 - 構造体（`Point(1, 2)`、`p.x`、`copy`）、文字列の `+`・`==`、配列（範囲チェックあり）、`allocate`・`size`・`bytes`・`to:型(x)`
 - `import stdio;` の `print`・`put`・`read_line`・`read_file`・`write_file`・`last_error`
+- `import bignum;`：大きな整数（`bignum.from`・`parse`・`add`・`sub`・`mul`・`div`・`mod`・`pow`・`compare`・`print` など）。orz で書いてある（[lib/bignum.orz](lib/bignum.orz)）
 - 自分のファイルの `import "util.orz";` と `export`
 - 関数ポインタ（`f:function:32(32, 32) = add;`）と、ジェネリクス（`struct List:T`、`function T get:T(…)`。型は呼び出しから推論）
 - GC（保守的なマーク・アンド・スイープ）。`--no-gc` で切れる
@@ -58,7 +59,23 @@ function nothing main() {
 - 値がコンパイル時に決まる式のオーバーフロー・0 除算などは、コンパイルエラー
 - それ以外は実行時に検出して止まる（`実行時エラー: ファイル名:行: 理由`、終了コード 101）。配列の範囲外、変換の範囲外、スタックの溢れなども同じ
 
-`extern` と、stdio 以外の標準ライブラリはまだありません。整形ツールと `bignum` は手順 8 です。
+- 整形ツール（`orz fmt`）：`;`・`{`・`}` で改行と字下げを決め、コメントと空行（1 行まで）を残す
+
+`extern` と、stdio・bignum 以外の標準ライブラリはまだありません。
+
+```
+import bignum;
+
+function nothing main() {
+    f:bignum.Big = bignum.from(1);
+    i:64 = 1;
+    while (i <= 50) {
+        f = bignum.mul(f, bignum.from(i));
+        i = i + 1;
+    }
+    bignum.print(f);   // 30414093201713378043612608166064768844377641568960512000000000000
+}
+```
 
 ## 使い方
 
@@ -69,6 +86,7 @@ cargo build --release
 ./target/release/orz run three.orz              # 作って、すぐ実行する
 ./target/release/orz build three.orz -o three   # 実行ファイルを作る
 ./target/release/orz asm three.orz -o -         # アセンブリを画面に出す
+./target/release/orz fmt three.orz              # 整形して、ファイルを書き換える（`-o -` なら画面に）
 ```
 
 ### Windows
@@ -114,6 +132,8 @@ cargo test
 | `src/sema.rs` | 型の確認と、中間表現（三番地コード）への変換 |
 | `src/escape.rs` | arena の持ち出しの検査（関数をまたいで調べる） |
 | `src/fold.rs` | 定数の畳み込み。コンパイル時にわかる誤りはここで出す |
+| `src/fmt.rs` | 整形ツール（`orz fmt`） |
 | `src/x86.rs` | x86-64 のアセンブリを出す |
 | `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わない。OS とのやりとり（Linux はシステムコール、Windows は kernel32）は「OS」の節にまとめてある |
 | `build.rs` | ランタイムを OS ごとにコンパイルして、コンパイラに埋め込む |
+| `lib/bignum.orz` | 標準ライブラリ bignum（orz で書いてあり、コンパイラに埋め込む） |

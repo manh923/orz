@@ -211,19 +211,16 @@ pub struct Token {
     pub span: Span,
 }
 
-/// コメント。整形ツール（手順 8）で使う。
+/// コメント。整形ツール（`orz fmt`）で使う。
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Comment {
+    /// `//` や `/* */` を含む、元のソースの場所。
     pub span: Span,
-    /// `//` や `/* */` を含む元の文字列。
-    pub text: String,
 }
 
 #[derive(Debug)]
 pub struct Lexed {
     pub tokens: Vec<Token>,
-    #[allow(dead_code)]
     pub comments: Vec<Comment>,
 }
 
@@ -323,7 +320,6 @@ impl<'a> Lexer<'a> {
                 }
                 self.comments.push(Comment {
                     span: Span::new(lo, self.pos),
-                    text: self.src[lo..self.pos].trim_end_matches('\r').to_string(),
                 });
             } else if c == b'/' && self.peek_at(1) == b'*' {
                 let lo = self.pos;
@@ -341,7 +337,6 @@ impl<'a> Lexer<'a> {
                 }
                 self.comments.push(Comment {
                     span: Span::new(lo, self.pos),
-                    text: self.src[lo..self.pos].to_string(),
                 });
             } else {
                 return Ok(());
@@ -664,10 +659,11 @@ mod tests {
 
     #[test]
     fn comments_kept() {
-        let l = lex("// a\nx /* b */ y").unwrap();
+        let src = "// a\nx /* b */ y";
+        let l = lex(src).unwrap();
         assert_eq!(l.comments.len(), 2);
-        assert_eq!(l.comments[0].text, "// a");
-        assert_eq!(l.comments[1].text, "/* b */");
+        assert_eq!(&src[l.comments[0].span.lo..l.comments[0].span.hi], "// a");
+        assert_eq!(&src[l.comments[1].span.lo..l.comments[1].span.hi], "/* b */");
     }
 
     #[test]

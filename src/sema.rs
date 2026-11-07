@@ -755,13 +755,15 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
             let (r, default_name) = match &imp.target {
                 ImportTarget::Std(name) => match name.as_str() {
                     "stdio" => (ModRef::Stdio, name.clone()),
-                    "math" | "socket" | "http" | "bignum" => {
+                    // orz で書いた標準ライブラリ（読み込むときに埋めてある）。
+                    _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
+                    "math" | "socket" | "http" => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
-                            .hint("今使えるのは stdio だけです"))
+                            .hint("今使えるのは stdio と bignum です"))
                     }
                     _ => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
-                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます（今使える標準ライブラリは stdio だけです）"))
+                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます（今使える標準ライブラリは stdio と bignum です）"))
                     }
                 },
                 ImportTarget::File(path) => {

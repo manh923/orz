@@ -4,9 +4,11 @@
 //!   orz build ファイル.orz [-o 出力]   実行ファイルを作る
 //!   orz run ファイル.orz               作って、すぐ実行する
 //!   orz asm ファイル.orz [-o 出力.s]   アセンブリだけ出す（`-o -` なら画面に）
+//!   orz fmt ファイル.orz [-o 出力]     整形する（`-o` がなければ、そのファイルを書き換える）
 
 mod ast;
 mod escape;
+mod fmt;
 mod fold;
 mod ir;
 mod lexer;
@@ -26,6 +28,9 @@ use x86::Os;
 const RUNTIME_LINUX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime_linux.o"));
 const RUNTIME_WINDOWS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime_windows.o"));
 
+/// orz で書いた標準ライブラリ（`import bignum;` などで読む）。
+const STD_LIBS: &[(&str, &str)] = &[("bignum", include_str!("../lib/bignum.orz"))];
+
 /// orz が動いている OS。
 const HOST: Os = if cfg!(windows) { Os::Windows } else { Os::Linux };
 
@@ -33,6 +38,7 @@ const USAGE: &str = "使い方:
   orz build ファイル.orz [-o 出力]   実行ファイルを作る
   orz run ファイル.orz               作って、すぐ実行する
   orz asm ファイル.orz [-o 出力.s]   アセンブリだけ出す（`-o -` なら画面に）
+  orz fmt ファイル.orz [-o 出力]     整形する（`-o` がなければ、そのファイルを書き換える。`-o -` なら画面に）
 
 オプション:
   --no-gc              GC を動かさず、終了時にまとめて解放する（すぐ終わるプログラム向け）
@@ -57,7 +63,7 @@ fn parse_args() -> Options {
         println!("{}", USAGE);
         exit(0);
     }
-    if !matches!(cmd.as_str(), "build" | "run" | "asm") {
+    if !matches!(cmd.as_str(), "build" | "run" | "asm" | "fmt") {
         eprintln!("`{}` というコマンドはありません\n{}", cmd, USAGE);
         exit(2);
     }
@@ -164,23 +170,34 @@ impl Files {
             let mut resolved = Vec::new();
             for (k, item) in self.progs[i].items.iter().enumerate() {
                 let ast::Item::Import(imp) = item else { continue };
-                let ast::ImportTarget::File(rel) = &imp.target else {
-                    continue;
-                };
-                let full = dir.join(rel);
-                let canon = full.canonicalize().map_err(|_| {
-                    source::Diag::new(imp.span, format!("ファイル `{}` が見つかりません", rel))
-                        .hint("パスは、import を書いたファイルから見た場所で書きます")
-                })?;
-                resolved.push((k, canon, imp.span, self.display_name(i, rel)));
+                match &imp.target {
+                    ast::ImportTarget::File(rel) => {
+                        let full = dir.join(rel);
+                        let canon = full.canonicalize().map_err(|_| {
+                            source::Diag::new(imp.span, format!("ファイル `{}` が見つかりません", rel))
+                                .hint("パスは、import を書いたファイルから見た場所で書きます")
+                        })?;
+                        resolved.push((k, canon, imp.span, self.display_name(i, rel), None));
+                    }
+                    ast::ImportTarget::Std(name) => {
+                        // orz で書いた標準ライブラリは、コンパイラに埋め込んである。
+                        if let Some((_, text)) = STD_LIBS.iter().find(|(n, _)| n == name) {
+                            let shown = format!("std/{}.orz", name);
+                            resolved.push((k, PathBuf::from(&shown), imp.span, shown, Some(*text)));
+                        }
+                    }
+                }
             }
-            for (k, canon, span, name) in resolved {
+            for (k, canon, span, name, builtin) in resolved {
                 let index = match self.paths.iter().position(|p| *p == canon) {
                     Some(j) => j,
                     None => {
-                        let text = std::fs::read_to_string(&canon).map_err(|e| {
-                            source::Diag::new(span, format!("ファイル `{}` を読めません: {}", name, e))
-                        })?;
+                        let text = match builtin {
+                            Some(t) => t.to_string(),
+                            None => std::fs::read_to_string(&canon).map_err(|e| {
+                                source::Diag::new(span, format!("ファイル `{}` を読めません: {}", name, e))
+                            })?,
+                        };
                         self.add(name, canon, text)?
                     }
                 };
@@ -305,8 +322,45 @@ fn run_tool(cmd: &mut Command, name: &str) {
     }
 }
 
+/// `orz fmt`：整形する。字句や構文の誤りがあれば、書き換えずに止まる。
+fn format_file(input: &Path, output: Option<PathBuf>) {
+    let text = match std::fs::read_to_string(input) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{} を読めません: {}", input.display(), e);
+            exit(1);
+        }
+    };
+    let formatted = match fmt::format(&text) {
+        Ok(f) => f,
+        Err(d) => {
+            eprint!(
+                "{}",
+                d.render(&SourceFile::new(input.display().to_string(), text))
+            );
+            exit(1);
+        }
+    };
+    let out = output.unwrap_or_else(|| input.to_path_buf());
+    if out.as_os_str() == "-" {
+        print!("{}", formatted);
+        return;
+    }
+    if out == input && formatted == text {
+        return;
+    }
+    if let Err(e) = std::fs::write(&out, formatted) {
+        eprintln!("{} に書けません: {}", out.display(), e);
+        exit(1);
+    }
+}
+
 fn main() {
     let opt = parse_args();
+    if opt.cmd == "fmt" {
+        format_file(&opt.input, opt.output);
+        return;
+    }
     let asm = compile(&opt.input, opt.no_fold, opt.no_gc, opt.target);
     match opt.cmd.as_str() {
         "asm" => {
