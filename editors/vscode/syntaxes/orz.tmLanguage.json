@@ -63,6 +63,14 @@
     "escapes": {
       "patterns": [
         {
+          "name": "constant.other.placeholder.orz",
+          "match": "\\{\\}"
+        },
+        {
+          "name": "constant.character.escape.orz",
+          "match": "\\{\\{|\\}\\}"
+        },
+        {
           "name": "constant.character.escape.orz",
           "match": "\\\\(?:lb|tab|n|t|r|\"|'|\\\\|0)"
         },

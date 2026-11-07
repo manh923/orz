@@ -1,0 +1,7 @@
+// error: `stdio.print` に値を 2 つ以上渡すときは、最初に書式の文字列を書きます
+import stdio;
+
+function nothing main() {
+    f:string = "{}";
+    stdio.print(f, 1);
+}

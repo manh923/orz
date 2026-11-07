@@ -3488,27 +3488,39 @@ impl<'c, 'p> FnLower<'c, 'p> {
         let maybe_str = Ty::Maybe(Box::new(Ty::Str));
         match name {
             "print" | "put" | "eprint" | "eput" => {
-                if args.len() != 1 {
-                    return Err(Diag::new(
-                        e.span,
-                        format!(
-                            "`{}` に渡せる値は 1 つですが、{} 個書かれています",
-                            full,
-                            args.len()
-                        ),
-                    )
-                    .hint("文字列なら `+` でつなげるか、`put` を何回かに分けて使います"));
+                if args.is_empty() {
+                    return Err(Diag::new(e.span, format!("`{}` には、表示する値を渡します", full))
+                        .hint("書式を使うなら `stdio.print(\"{} + {} = {}\", a, b, a + b)` のように書きます"));
                 }
-                let (v, t) = self.expr(&args[0], None)?;
-                let desc = self.ctx.intern(t.desc().as_bytes());
-                if name.starts_with('e') {
-                    // 標準エラー出力（エラーメッセージなど）。
-                    let newline = Operand::Imm((name == "eprint") as i64);
-                    self.rt(Rt::EPut, vec![v, Operand::Str(desc), newline], e.span, false)?;
-                    return Ok(None);
+                // 値が 2 つ以上なら、最初は書式（`{}` のところに、後ろの値が順に入る）。
+                let (pieces, first) = if args.len() == 1 {
+                    (vec![Piece::Value(0)], 0)
+                } else {
+                    (format_pieces(&full, &args[0], args.len() - 1)?, 1)
+                };
+                // 値は、表示する前に左から順に計算する。
+                let mut values = Vec::new();
+                for a in &args[first..] {
+                    values.push(self.expr(a, None)?);
                 }
-                self.rt(Rt::Put, vec![v, Operand::Str(desc)], e.span, false)?;
-                if name == "print" {
+                let to_stderr = name.starts_with('e');
+                let newline = name == "print" || name == "eprint";
+                let n = pieces.len();
+                for (k, piece) in pieces.into_iter().enumerate() {
+                    let (v, desc) = match piece {
+                        Piece::Text(text) => (Operand::Str(self.ctx.intern(&text)), Ty::Str.desc()),
+                        Piece::Value(i) => (values[i].0, values[i].1.desc()),
+                    };
+                    let desc = Operand::Str(self.ctx.intern(desc.as_bytes()));
+                    if to_stderr {
+                        // 標準エラー出力（エラーメッセージなど）。
+                        let nl = Operand::Imm((newline && k + 1 == n) as i64);
+                        self.rt(Rt::EPut, vec![v, desc, nl], e.span, false)?;
+                    } else {
+                        self.rt(Rt::Put, vec![v, desc], e.span, false)?;
+                    }
+                }
+                if newline && !to_stderr {
                     self.rt(Rt::Newline, vec![], e.span, false)?;
                 }
                 Ok(None)
@@ -3771,6 +3783,70 @@ impl<'c, 'p> FnLower<'c, 'p> {
         }
         Ok((arr, Ty::Array(Box::new(elem))))
     }
+}
+
+/// `stdio.print` の書式の、文字の部分と `{}` の部分。
+enum Piece {
+    Text(Vec<u8>),
+    /// 何番目の値か。
+    Value(usize),
+}
+
+/// 書式（`"{} + {} = {}"`）を分ける。`{{` と `}}` は `{` と `}` そのもの。
+/// `{}` の数が値の数と違えば、コンパイルエラー。
+fn format_pieces(full: &str, fmt: &Expr, nvalues: usize) -> Result<Vec<Piece>, Diag> {
+    let ExprKind::Str(bytes) = &fmt.kind else {
+        return Err(Diag::new(
+            fmt.span,
+            format!(
+                "`{}` に値を 2 つ以上渡すときは、最初に書式の文字列を書きます",
+                full
+            ),
+        )
+        .hint("例：stdio.print(\"{} + {} = {}\", a, b, a + b)。`{}` のところに、後ろの値が順に入ります"));
+    };
+    let mut pieces = Vec::new();
+    let mut text = Vec::new();
+    let mut count = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1)) {
+            (b'{', Some(b'}')) => {
+                if !text.is_empty() {
+                    pieces.push(Piece::Text(std::mem::take(&mut text)));
+                }
+                pieces.push(Piece::Value(count));
+                count += 1;
+                i += 2;
+            }
+            (b'{', Some(b'{')) | (b'}', Some(b'}')) => {
+                text.push(bytes[i]);
+                i += 2;
+            }
+            (b'{' | b'}', _) => {
+                return Err(Diag::new(
+                    fmt.span,
+                    "書式の中で `{` や `}` を表示するときは、`{{` や `}}` と書きます",
+                )
+                .hint("`{}` のところには、後ろの値が入ります"))
+            }
+            (b, _) => {
+                text.push(b);
+                i += 1;
+            }
+        }
+    }
+    if !text.is_empty() {
+        pieces.push(Piece::Text(text));
+    }
+    if count != nvalues {
+        return Err(Diag::new(
+            fmt.span,
+            format!("書式の `{{}}` は {} 個ですが、値は {} 個あります", count, nvalues),
+        )
+        .hint("`{}` 1 つに、値が 1 つずつ入ります"));
+    }
+    Ok(pieces)
 }
 
 fn is_int_literal(e: &Expr) -> bool {

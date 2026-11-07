@@ -1,0 +1,6 @@
+// error: 書式の `{}` は 2 個ですが、値は 1 個あります
+import stdio;
+
+function nothing main() {
+    stdio.print("{} と {}", 1);
+}

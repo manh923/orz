@@ -1,0 +1,6 @@
+// error: 書式の中で `{` や `}` を表示するときは、`{{` や `}}` と書きます
+import stdio;
+
+function nothing main() {
+    stdio.print("{x} = {}", 1);
+}

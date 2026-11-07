@@ -1,4 +1,5 @@
-// error: `stdio.print` に渡せる値は 1 つですが、2 個書かれています
+// error: 書式の `{}` は 0 個ですが、値は 1 個あります
+// 値を 2 つ以上渡すと、最初の文字列は書式になる
 import stdio;
 
 function nothing main() {

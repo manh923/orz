@@ -1,0 +1,21 @@
+// exit: 0
+// stdio.print の書式（{} のところに値が入る）
+import stdio;
+
+function 32 mul(x:32, y:32) {
+    return x * y;
+}
+
+function nothing main() {
+    x:32 = 10;
+    y:32 = 20;
+    stdio.print("{} * {} = {}", x, y, mul(x, y));
+    stdio.print("{}{}", "a", 1.5);
+    stdio.print("{{}} {} {{x}}", [1, 2]);
+    stdio.put("{} ", true);
+    stdio.print("{}", null);
+    stdio.print("{} は {} 歳", "太郎", to:8(20));
+    stdio.eprint("エラー: {} 行目", 3);
+    // 値が 1 つなら、書式ではない
+    stdio.print("{}");
+}
