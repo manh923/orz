@@ -1,0 +1,5 @@
+// error: `.orh` に書けるのは、`extern` の関数、`struct`、`immutable` だけです
+import "modules/bad.orh";
+
+function nothing main() {
+}

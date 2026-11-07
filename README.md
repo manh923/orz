@@ -51,6 +51,9 @@ function nothing main() {
 - 構造体（`Point(1, 2)`、`p.x`、`copy`）、文字列の `+`・`==`、配列（範囲チェックあり）、`allocate`・`size`・`bytes`・`to:型(x)`
 - `import stdio;` の `print`・`put`・`read_line`・`read_file`・`write_file`・`last_error`
 - `import bignum;`：大きな整数（`bignum.from`・`parse`・`add`・`sub`・`mul`・`div`・`mod`・`pow`・`compare`・`print` など）。orz で書いてある（[lib/bignum.orz](lib/bignum.orz)）
+- `import strings;`・`lists;`・`maps;`・`os;`：文字列（切り出し・検索・分割・`Builder`）、長さの変わる配列、文字列をキーにした表、コマンドの実行・環境変数など。どれも orz で書いてある（[lib/](lib/)）
+- `extern function 型 名前(…);` と `.orh`：ランタイムや C の関数を呼ぶ（`--link` でオブジェクトを足せる）
+- `array(n, 初期値)`、`stdio.eprint`・`eput`（標準エラー出力）
 - 自分のファイルの `import "util.orz";` と `export`
 - 関数ポインタ（`f:function:32(32, 32) = add;`）と、ジェネリクス（`struct List:T`、`function T get:T(…)`。型は呼び出しから推論）
 - GC（保守的なマーク・アンド・スイープ）。`--no-gc` で切れる
@@ -61,7 +64,7 @@ function nothing main() {
 
 - 整形ツール（`orz fmt`）：`;`・`{`・`}` で改行と字下げを決め、コメントと空行（1 行まで）を残す
 
-`extern` と、stdio・bignum 以外の標準ライブラリはまだありません。
+`math`・`socket` などの標準ライブラリはまだありません。
 
 ```
 import bignum;
@@ -136,4 +139,4 @@ cargo test
 | `src/x86.rs` | x86-64 のアセンブリを出す |
 | `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わない。OS とのやりとり（Linux はシステムコール、Windows は kernel32）は「OS」の節にまとめてある |
 | `build.rs` | ランタイムを OS ごとにコンパイルして、コンパイラに埋め込む |
-| `lib/bignum.orz` | 標準ライブラリ bignum（orz で書いてあり、コンパイラに埋め込む） |
+| `lib/*.orz` | orz で書いた標準ライブラリ（bignum、strings、lists、maps、os）。コンパイラに埋め込む |

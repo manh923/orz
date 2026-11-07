@@ -1,0 +1,149 @@
+// maps：文字列をキーにした表（ハッシュ表。標準ライブラリ）
+//
+// import maps; で使う。
+//
+//     m:maps.Map:32 = maps.new();
+//     maps.put(m, "apple", 3);
+//     n:maybe:32 = maps.get(m, "apple");   // 3（なければ null）
+//     maps.has(m, "pear");                  // false
+//     maps.remove(m, "apple");
+//     ks:array:string = maps.keys(m);       // キーすべて（順番は決まっていない）
+
+export struct Map:V {
+    buckets:array:maybe:Entry:V;
+    count:32;
+}
+
+export struct Entry:V {
+    key:string;
+    hash:64;
+    value:V;
+    next:maybe:Entry:V;
+}
+
+export function Map:V new:V() {
+    return Map:V(array(8), 0);
+}
+
+// key に value を入れる（すでにあれば置き換える）。
+export function nothing put:V(m:Map:V, key:string, value:V) {
+    h:64 = hash(key);
+    e:maybe:Entry:V = m.buckets[slot(h, length(m.buckets))];
+    while (e != null) {
+        if (e.hash == h and e.key == key) {
+            e.value = value;
+            return;
+        }
+        e = e.next;
+    }
+    if ((m.count + 1) * 4 > length(m.buckets) * 3) {
+        grow(m);
+    }
+    i:32 = slot(h, length(m.buckets));
+    m.buckets[i] = Entry:V(key, h, value, m.buckets[i]);
+    m.count = m.count + 1;
+}
+
+// key の値。なければ null。
+export function maybe:V get:V(m:Map:V, key:string) {
+    h:64 = hash(key);
+    e:maybe:Entry:V = m.buckets[slot(h, length(m.buckets))];
+    while (e != null) {
+        if (e.hash == h and e.key == key) {
+            return e.value;
+        }
+        e = e.next;
+    }
+    return null;
+}
+
+export function bool has:V(m:Map:V, key:string) {
+    h:64 = hash(key);
+    e:maybe:Entry:V = m.buckets[slot(h, length(m.buckets))];
+    while (e != null) {
+        if (e.hash == h and e.key == key) {
+            return true;
+        }
+        e = e.next;
+    }
+    return false;
+}
+
+// key を消す。なければ false。
+export function bool remove:V(m:Map:V, key:string) {
+    h:64 = hash(key);
+    i:32 = slot(h, length(m.buckets));
+    prev:maybe:Entry:V = null;
+    e:maybe:Entry:V = m.buckets[i];
+    while (e != null) {
+        if (e.hash == h and e.key == key) {
+            if (prev == null) {
+                m.buckets[i] = e.next;
+            } else {
+                prev.next = e.next;
+            }
+            m.count = m.count - 1;
+            return true;
+        }
+        prev = e;
+        e = e.next;
+    }
+    return false;
+}
+
+export function 32 count:V(m:Map:V) {
+    return m.count;
+}
+
+// キーすべて（順番は決まっていない）。
+export function array:string keys:V(m:Map:V) {
+    ks:array:string = array(m.count);
+    k:32 = 0;
+    i:32 = 0;
+    while (i < length(m.buckets)) {
+        e:maybe:Entry:V = m.buckets[i];
+        while (e != null) {
+            ks[k] = e.key;
+            k = k + 1;
+            e = e.next;
+        }
+        i = i + 1;
+    }
+    return ks;
+}
+
+// ---------------- 中で使うもの ----------------
+
+// FNV-1a（32 ビット）
+function 64 hash(s:string) {
+    p:pointer:8 = bytes(s);
+    h:64 = 2166136261;
+    i:32 = 0;
+    while (i < length(s)) {
+        h = ((h xor to:64(p[i])) * 16777619) and 4294967295;
+        i = i + 1;
+    }
+    return h;
+}
+
+function 32 slot(h:64, n:32) {
+    return to:32(h % to:64(n));
+}
+
+// 表を 2 倍にして、入れ直す。
+function nothing grow:V(m:Map:V) {
+    old:array:maybe:Entry:V = m.buckets;
+    m.buckets = array(length(old) * 2);
+    i:32 = 0;
+    while (i < length(old)) {
+        e:maybe:Entry:V = old[i];
+        while (e != null) {
+            next:maybe:Entry:V = e.next;
+            j:32 = slot(e.hash, length(m.buckets));
+            e.next = m.buckets[j];
+            m.buckets[j] = e;
+            e = next;
+        }
+        i = i + 1;
+    }
+}

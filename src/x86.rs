@@ -45,8 +45,11 @@ pub fn emit(prog: &ir::Program, srcs: &[SourceFile], os: Os, gc_disabled: bool) 
     };
     g.header();
     for (i, f) in prog.funcs.iter().enumerate() {
-        g.func = i;
-        g.function(f);
+        // extern の関数は、中身がランタイムや C の側にある。
+        if f.ext.is_none() {
+            g.func = i;
+            g.function(f);
+        }
     }
     g.data();
     g.out
@@ -357,8 +360,12 @@ impl<'a> Gen<'a> {
                 asm!(self, "jmp {}", e);
             }
             Inst::Call { dst, func, args } => {
-                let name = self.prog.funcs[*func as usize].symbol.clone();
-                self.call(&name, args, &[]);
+                let callee = &self.prog.funcs[*func as usize];
+                let name = callee.symbol.clone();
+                match callee.ext.clone() {
+                    Some(ext) => self.call_extern(&name, args, &ext),
+                    None => self.call(&name, args, &[]),
+                }
                 if let Some(d) = dst {
                     self.store_temp(*d);
                 }
@@ -813,6 +820,50 @@ impl<'a> Gen<'a> {
         let cleanup = nstack * 8 + pad;
         if cleanup > 0 {
             asm!(self, "addq ${}, %rsp", cleanup);
+        }
+    }
+
+    /// `extern` の関数を、C の呼び出し方（System V ABI）で呼ぶ。
+    /// decnum は %xmm0〜7、ほかは整数のレジスタに順に入れ、入らないものはスタックに積む。
+    /// 戻り値は orz の形（32 は符号を広げ、8 と bool は 0 を詰める）にそろえて %rax に置く。
+    fn call_extern(&mut self, name: &str, args: &[Operand], ext: &ir::ExternSig) {
+        let (mut ints, mut sses, mut stack) = (Vec::new(), Vec::new(), Vec::new());
+        for (a, t) in args.iter().zip(&ext.params) {
+            if *t == ir::CType::Double && sses.len() < 8 {
+                sses.push(*a);
+            } else if *t != ir::CType::Double && ints.len() < ARG_REGS.len() {
+                ints.push(*a);
+            } else {
+                stack.push(*a);
+            }
+        }
+        let pad = if stack.len() % 2 == 1 { 8 } else { 0 };
+        if pad > 0 {
+            asm!(self, "subq $8, %rsp");
+        }
+        for a in stack.iter().rev() {
+            self.load(*a, "%rax");
+            asm!(self, "pushq %rax");
+        }
+        for (i, a) in sses.iter().enumerate() {
+            self.load(*a, "%rax");
+            asm!(self, "movq %rax, %xmm{}", i);
+        }
+        for (a, reg) in ints.iter().zip(ARG_REGS) {
+            self.load(*a, reg);
+        }
+        // 可変長の引数を取る C の関数のために、%xmm で渡した数を %al に入れる。
+        asm!(self, "movl ${}, %eax", sses.len());
+        asm!(self, "call {}", name);
+        let cleanup = stack.len() * 8 + pad;
+        if cleanup > 0 {
+            asm!(self, "addq ${}, %rsp", cleanup);
+        }
+        match ext.ret {
+            Some(ir::CType::I32) => asm!(self, "movslq %eax, %rax"),
+            Some(ir::CType::U8) => asm!(self, "movzbl %al, %eax"),
+            Some(ir::CType::Double) => asm!(self, "movq %xmm0, %rax"),
+            Some(ir::CType::Word) | None => {}
         }
     }
 

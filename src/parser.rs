@@ -88,10 +88,6 @@ impl Parser {
         }
     }
 
-    fn not_yet(&self, what: &str) -> Diag {
-        Diag::new(self.span(), format!("{}はまだ実装していません", what))
-    }
-
     // ---------------- トップレベル ----------------
 
     fn item(&mut self) -> PResult<Item> {
@@ -105,7 +101,14 @@ impl Parser {
             }
             Tok::Kw(Kw::Import) => Item::Import(self.import()?),
             Tok::Kw(Kw::Export) => return Err(Diag::new(self.span(), "`export` が 2 つ続いています")),
-            Tok::Kw(Kw::Extern) => return Err(self.not_yet("`extern`")),
+            Tok::Kw(Kw::Extern) => {
+                self.bump();
+                if self.peek() != &Tok::Kw(Kw::Function) {
+                    return Err(Diag::new(self.span(), "`extern` の後には `function` を書きます")
+                        .hint("例：extern function 64 orz_rt_run(args:array:string);"));
+                }
+                Item::Func(self.func_with(true)?)
+            }
             Tok::Kw(Kw::Immutable) => {
                 self.bump();
                 Item::Global(self.decl(true)?)
@@ -199,6 +202,11 @@ impl Parser {
     }
 
     fn func(&mut self) -> PResult<Func> {
+        self.func_with(false)
+    }
+
+    /// 関数の定義。`is_extern` なら中身の代わりに `;` で終わる。
+    fn func_with(&mut self, is_extern: bool) -> PResult<Func> {
         self.bump(); // function
         if self.peek() == &Tok::Colon {
             return Err(
@@ -241,7 +249,20 @@ impl Parser {
                 break;
             }
         }
-        let body = self.block()?;
+        let body = if is_extern {
+            if self.peek() == &Tok::LBrace {
+                return Err(Diag::new(self.span(), "`extern` の関数には中身を書きません")
+                    .hint("中身はランタイムや C の側にあります。`;` で終えます"));
+            }
+            let close = self.span();
+            self.semi()?;
+            Block {
+                stmts: Vec::new(),
+                close,
+            }
+        } else {
+            self.block()?
+        };
         Ok(Func {
             name,
             name_span,
@@ -250,6 +271,7 @@ impl Parser {
             body,
             exported: false,
             type_params,
+            is_extern,
         })
     }
 
@@ -784,8 +806,13 @@ impl Parser {
                 self.bump();
                 self.bump();
                 let n = self.expr()?;
+                let init = if self.eat(&Tok::Comma) {
+                    Some(Box::new(self.expr()?))
+                } else {
+                    None
+                };
                 self.expect(Tok::RParen, "`array` の終わりの")?;
-                ExprKind::ArrayNew(Box::new(n))
+                ExprKind::ArrayNew(Box::new(n), init)
             }
             _ => return Err(self.unexpected("式")),
         };

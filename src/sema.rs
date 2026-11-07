@@ -648,8 +648,9 @@ fn unknown_type(span: Span, name: &str) -> Diag {
 
 /// ファイル名から、名前空間の名前を作る（`lib/util.orz` → `util`）。
 fn file_stem(path: &str) -> String {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    base.strip_suffix(".orz").unwrap_or(base).to_string()
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = base.strip_suffix(".orz").or_else(|| base.strip_suffix(".orh"));
+    stem.unwrap_or(base).to_string()
 }
 
 fn is_ident(s: &str) -> bool {
@@ -759,7 +760,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
                     _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
                     "math" | "socket" | "http" => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
-                            .hint("今使えるのは stdio と bignum です"))
+                            .hint("今使えるのは stdio、strings、lists、maps、os、bignum です"))
                     }
                     _ => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
@@ -797,6 +798,12 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
             let (name, span, top) = match item {
                 Item::Func(f) if f.type_params.is_empty() => {
                     (&f.name, f.name_span, TopName::Func(normal_funcs.len()))
+                }
+                Item::Func(f) if f.is_extern => {
+                    return Err(Diag::new(
+                        f.name_span,
+                        "`extern` の関数はジェネリクスにできません",
+                    ))
                 }
                 Item::Func(f) => (
                     &f.name,
@@ -875,13 +882,19 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
     for (m, f) in &normal_funcs {
         check_params(&ctx, *m, f)?;
         let (params, ret) = ctx.func_types(*m, f, &Vec::new())?;
+        let symbol = if f.is_extern {
+            extern_sig(f, &params, &ret)?;
+            f.name.clone()
+        } else {
+            format!("orz_f{}_{}", m, f.name)
+        };
         ctx.funcs.push(FuncInfo {
             sig: FuncSig {
                 name: f.name.clone(),
                 params,
                 ret,
                 exported: f.exported,
-                symbol: format!("orz_f{}_{}", m, f.name),
+                symbol,
             },
             ast: f,
             module: *m,
@@ -1021,6 +1034,36 @@ fn opaque_params(names: &[String]) -> Vec<Ty> {
         .collect()
 }
 
+/// `extern` の関数の、C の呼び出し方での引数と戻り値の種類。使えない型ならエラー。
+fn extern_sig(f: &Func, params: &[Ty], ret: &Option<Ty>) -> Result<ir::ExternSig, Diag> {
+    fn ctype(t: &Ty) -> Option<ir::CType> {
+        Some(match t {
+            Ty::Int(IntTy::U8) | Ty::Bool => ir::CType::U8,
+            Ty::Int(IntTy::I32) => ir::CType::I32,
+            Ty::Int(IntTy::I64) | Ty::Address | Ty::Str | Ty::Array(_) | Ty::Pointer(_) | Ty::Struct(..) => {
+                ir::CType::Word
+            }
+            Ty::Dec => ir::CType::Double,
+            // null かもしれないアドレス（maybe:string など）。maybe:32 などの箱は C にはわからない。
+            Ty::Maybe(inner) if !inner.needs_box() => return ctype(inner),
+            _ => return None,
+        })
+    }
+    let bad = |span: Span, t: &Ty| {
+        Diag::new(span, format!("`extern` の関数には `{}` 型は使えません", t.name()))
+            .hint("使えるのは数、bool、decnum、address、string、array、pointer、構造体と、そのアドレスの maybe です")
+    };
+    let mut ps = Vec::new();
+    for (p, t) in f.params.iter().zip(params) {
+        ps.push(ctype(t).ok_or_else(|| bad(p.span, t))?);
+    }
+    let r = match ret {
+        Some(t) => Some(ctype(t).ok_or_else(|| bad(f.ret.span(), t))?),
+        None => None,
+    };
+    Ok(ir::ExternSig { params: ps, ret: r })
+}
+
 fn check_params(ctx: &Ctx, m: usize, f: &Func) -> Result<(), Diag> {
     let mut seen = HashSet::new();
     for p in &f.params {
@@ -1050,6 +1093,9 @@ fn top_name_conflict(span: Span, name: &str, top: TopName) -> Diag {
 
 /// `main` の形を確かめる。（値を返すか、引数を受け取るか）
 fn check_main(f: &Func, sig: &FuncSig) -> Result<(bool, bool), Diag> {
+    if f.is_extern {
+        return Err(Diag::new(f.name_span, "`main` は `extern` にできません"));
+    }
     let takes_args = match sig.params.as_slice() {
         [] => false,
         [Ty::Array(t)] if **t == Ty::Str => true,
@@ -1191,6 +1237,23 @@ fn lower_func(ctx: &mut Ctx, index: usize) -> Result<ir::Function, Diag> {
         let f = &ctx.funcs[index];
         (f.ast, f.module, f.tparams.clone(), f.sig.clone())
     };
+    if ast.is_extern {
+        return Ok(ir::Function {
+            name: sig.name.clone(),
+            symbol: sig.symbol.clone(),
+            returns_value: sig.ret.is_some(),
+            nparams: sig.params.len() as u32,
+            insts: Vec::new(),
+            ntemps: 0,
+            nvars: 0,
+            spans: Vec::new(),
+            var_depth: Vec::new(),
+            ptr_temps: Vec::new(),
+            ptr_vars: Vec::new(),
+            slots: Vec::new(),
+            ext: Some(extern_sig(ast, &sig.params, &sig.ret)?),
+        });
+    }
     let l = lower_body(
         ctx,
         module,
@@ -1244,6 +1307,7 @@ impl Body {
             ptr_temps: self.ptr_temps,
             ptr_vars: self.ptr_vars,
             slots: self.slots,
+            ext: None,
         }
     }
 }
@@ -1547,6 +1611,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     | Rt::Box
                     | Rt::Copy
                     | Rt::ArrayCopy
+                    | Rt::ArrayFill
                     | Rt::Pow(_)
             );
             if !pure {
@@ -2313,7 +2378,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 int_literal(t.width().bytes() as u64, false, want, e.span)
             }
             ExprKind::ArrayLit(elems) => self.array_lit(e, elems, want),
-            ExprKind::ArrayNew(n) => self.array_new(e, n, want),
+            ExprKind::ArrayNew(n, init) => self.array_new(e, n, init.as_deref(), want),
         }
     }
 
@@ -2371,6 +2436,13 @@ impl<'c, 'p> FnLower<'c, 'p> {
             TopName::Func(i) => {
                 if self.const_ctx() {
                     return Err(Diag::new(span, "グローバル変数の初期値に、関数は使えません"));
+                }
+                if self.ctx.funcs[i].ast.is_extern {
+                    return Err(Diag::new(
+                        span,
+                        format!("`extern` の関数 `{}` は、関数ポインタにはできません", name),
+                    )
+                    .hint("呼び出し方が orz の関数と違うためです。orz の関数で包んでから使います"));
                 }
                 Ok((Operand::Func(i as u32), self.ctx.funcs[i].sig.ty()))
             }
@@ -3415,7 +3487,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         let full = format!("{}.{}", ns, name);
         let maybe_str = Ty::Maybe(Box::new(Ty::Str));
         match name {
-            "print" | "put" => {
+            "print" | "put" | "eprint" | "eput" => {
                 if args.len() != 1 {
                     return Err(Diag::new(
                         e.span,
@@ -3429,6 +3501,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
                 let (v, t) = self.expr(&args[0], None)?;
                 let desc = self.ctx.intern(t.desc().as_bytes());
+                if name.starts_with('e') {
+                    // 標準エラー出力（エラーメッセージなど）。
+                    let newline = Operand::Imm((name == "eprint") as i64);
+                    self.rt(Rt::EPut, vec![v, Operand::Str(desc), newline], e.span, false)?;
+                    return Ok(None);
+                }
                 self.rt(Rt::Put, vec![v, Operand::Str(desc)], e.span, false)?;
                 if name == "print" {
                     self.rt(Rt::Newline, vec![], e.span, false)?;
@@ -3459,7 +3537,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ok(Some((v, Ty::Str)))
             }
             _ => Err(Diag::new(e.span, format!("`{}` に `{}` はありません", ns, name))
-                .hint("stdio にあるのは print、put、read_line、read_file、write_file、last_error です")),
+                .hint("stdio にあるのは print、put、eprint、eput、read_line、read_file、write_file、last_error です")),
         }
     }
 
@@ -3625,7 +3703,13 @@ impl<'c, 'p> FnLower<'c, 'p> {
     }
 
     /// `array(n)`
-    fn array_new(&mut self, e: &Expr, n: &Expr, want: Option<&Ty>) -> Result<(Operand, Ty), Diag> {
+    fn array_new(
+        &mut self,
+        e: &Expr,
+        n: &Expr,
+        init: Option<&Expr>,
+        want: Option<&Ty>,
+    ) -> Result<(Operand, Ty), Diag> {
         let elem = match want {
             Some(Ty::Array(t)) => (**t).clone(),
             Some(Ty::Maybe(inner)) if matches!(**inner, Ty::Array(_)) => match &**inner {
@@ -3637,7 +3721,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("例：a:array:32 = array(10);"))
             }
         };
-        if let Ty::Struct(..) | Ty::Func(..) = elem {
+        if init.is_none() && matches!(elem, Ty::Struct(..) | Ty::Func(..)) {
             return Err(Diag::new(
                 e.span,
                 format!(
@@ -3646,7 +3730,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 ),
             )
             .hint(format!(
-                "`array:maybe:{}` にするか、`[…, …]` のように要素を並べて作ります",
+                "`array(n, 初期値)` のように初期値を渡すか、`array:maybe:{}` にします",
                 elem.name()
             )));
         }
@@ -3673,6 +3757,18 @@ impl<'c, 'p> FnLower<'c, 'p> {
             ],
             e.span,
         )?;
+        if let Some(init) = init {
+            // すべての要素に、同じ値を入れる。
+            let v = self.expr_as(init, &elem)?;
+            let slots = self.ctx.elem_slots(&elem);
+            self.rt(
+                Rt::ArrayFill,
+                vec![arr, v, Operand::Imm(elem.width().bytes())],
+                e.span,
+                false,
+            )?;
+            *self.slots.last_mut().unwrap() = slots;
+        }
         Ok((arr, Ty::Array(Box::new(elem))))
     }
 }

@@ -1,0 +1,6 @@
+// runtime: strings.slice の範囲（2〜5）が、長さ 3 の文字列の外です
+import strings;
+
+function nothing main() {
+    s:string = strings.slice("abc", 2, 5);
+}

@@ -112,6 +112,7 @@ stdio.print(length(a));
 
 - **中身:** 要素数のヘッダが付いたメモリを指すアドレス。関数には1ワードで渡せる。代入しても複製はされず、同じ配列を指す
 - **`array(n)`の初期値:** 整数・`bool`・`address`は0、`string`は`""`、`array`は空の配列、`maybe`と`pointer`は`null`。`array`と`string`の要素が`null`になることはない
+- **`array(n, 初期値)`:** すべての要素に同じ値を入れる（`array(3, 7)`は`[7, 7, 7]`）。構造体なら同じものを指す。構造体や関数の配列も、これで作れる
 - **`==`と`!=`:** 同じ配列を指しているかを比べる。中身は比べない
 - **表示:** `stdio.print(a)`は`[1, 2, 3]`のように表示する。中の文字列は`"…"`で囲む
 - **長さ:** 作成時に固定する。伸ばせるリストはライブラリで提供する
@@ -357,7 +358,7 @@ r.x = 7;            // p.x は 5 のまま
 - **フィールドの型:** 構造体のフィールドに構造体を書くと、そのアドレスを持つ。自分と同じ構造体も`maybe`を付ければ書ける（`next:maybe:Node;`）。`maybe`を付けずに自分自身を含む（ほかの構造体を通しても）と、作れないのでコンパイルエラー
 - **並べ方:** フィールドはCと同じく、それぞれの幅（1・4・8バイト）にそろえて並べる
 - **`size(:Point)`:** 変数や`pointer:Point`の要素に入るのはアドレスなので、8を返す
-- **配列:** `array:Point`は`array(n)`では作れない（要素の初期値がないため）。`array:maybe:Point`にするか、`[Point(…), …]`で作る
+- **配列:** `array:Point`は`array(n)`では作れない（要素の初期値がないため）。`array(n, Point(0, 0))`のように初期値を渡すか、`array:maybe:Point`にするか、`[Point(…), …]`で作る
 - **表示:** `stdio.print(p)`は`Point(x: 1, y: 2)`のように表示する。自分自身を指す構造体でも止まるよう、深さ20より先は`…`にする
 
 ### 関数ポインタ
@@ -378,7 +379,7 @@ g:function:nothing() = main;
 - 型が合わない関数を入れるとコンパイルエラー
 - 変数、フィールド、配列の要素に入った関数も、`f(1, 2)`や`ops[0](1, 2)`のように呼べる
 - `==`と`!=`は、同じ関数かを比べる
-- `array:function:…`は`array(n)`では作れない（要素の初期値がないため）
+- `array:function:…`は`array(n)`では作れない（要素の初期値がないため）。`array(n, 初期値)`なら作れる
 - `null`を入れるには`maybe:function:32(32, 32)`のように`maybe`を付ける
 - 大きさはポインタと同じ幅
 
@@ -441,7 +442,7 @@ immutable WIDTH:32 = 80;
 
 `import`したものは、名前空間（ライブラリの名前）を前に付けて使います。別々のライブラリに同じ名前の関数があってもぶつかりません。
 
-- **名前だけ:** `import stdio;`のように書くと、標準ライブラリのフォルダから`stdio.orh`と`stdio.orz`を探し、あるものを全部読む。拡張子は書かない
+- **名前だけ:** `import stdio;`のように書くと、標準ライブラリを読む。拡張子は書かない。orzで書いた標準ライブラリ（`strings`、`lists`、`maps`、`os`、`bignum`）は、コンパイラに埋め込んである
 - **`"..."`:** 自分のファイル。`import`を書いたファイルから見た相対パス
 - **同じファイル:** 何度`import`されても1回だけ読む
 - **名前空間:** 標準ライブラリはその名前（`import http;`なら`http`）、自分のファイルは拡張子を除いたファイル名（`import "lib/util.orz";`なら`util`）
@@ -472,6 +473,15 @@ function nothing main() {
 
 `.orh`は、ライブラリを作る人向けの、宣言だけを書くファイルです。標準ライブラリを使うだけなら意識する必要はありません。書けるのは`extern`の付いた関数、`struct`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
 
+- **`import "socket.orh";`:** `.orh`の中のものは、すべて`export`したものとみなす。名前空間は拡張子を除いたファイル名
+- **`.orz`の中:** `extern`の関数は`.orz`にも書ける（`export`を付けなければ、そのファイルの中だけで使える）
+- **呼び出し方:** Cと同じ（System V ABI）。`decnum`は`double`として`%xmm`で渡す。戻り値の`32`、`8`、`bool`は、Cの`int`、`unsigned char`、`_Bool`として受け取る
+- **使える型:** 数、`bool`、`decnum`、`address`、`string`（0で終わる`char *`）、`array`（先頭の要素のアドレス）、`pointer`、構造体と、そのアドレスの`maybe`。`maybe:32`などの箱と関数は使えない
+- **関数ポインタ:** `extern`の関数は関数ポインタにできない（呼び出し方が違うため）。orzの関数で包んで使う
+- **戻り値:** `extern`の関数が返す`string`や`array`は、ランタイムが作ったもの（長さのヘッダが付いたもの）でなければならない。arenaの検査では、そこで新しく作ったものとみなす
+- **リンク:** 中身はランタイムにあるもののほか、`orz build x.orz --link foo.o`で渡したオブジェクトやライブラリから探す
+- **Windows:** Windowsでも System V の呼び出し方なので、そのまま呼べるのはランタイムと、`-mabi=sysv`でコンパイルしたものだけ
+
 ```
 // socket.orh
 extern function 32 socket(domain:32, type:32, protocol:32);
@@ -482,11 +492,15 @@ extern function 32 close(fd:32);
 
 - orzどうしは`import "x.orz"`でソースを直接読むので、ヘッダーは要らない
 - 標準ライブラリは`.orh`でOSやランタイムを宣言し、その上に使いやすい関数をorzで書く
-- `extern`の関数にジェネリクスを使うと、使われた型ごとにランタイムの関数を呼ぶ。たとえば`stdio.orh`に`extern function nothing print:T(x:T);`があれば、`stdio.print(42)`はランタイムの`print_32`を呼ぶ
+- `extern`の関数にジェネリクスを使うと、使われた型ごとにランタイムの関数を呼ぶ。たとえば`stdio.orh`に`extern function nothing print:T(x:T);`があれば、`stdio.print(42)`はランタイムの`print_32`を呼ぶ（まだない。今はジェネリクスの`extern`はコンパイルエラー）
 
 | 標準ライブラリ | 中身 | 用意する時期 |
 | --- | --- | --- |
-| `stdio` | `print`、`put`、`read_line`、`read_file`、`write_file`、`last_error` | 手順5 |
+| `stdio` | `print`、`put`、`eprint`、`eput`、`read_line`、`read_file`、`write_file`、`last_error` | 手順5 |
+| `strings` | 文字列の切り出し・検索・分割など、長い文字列を作る`Builder` | セルフホストの準備 |
+| `lists` | 長さの変わる配列`lists.List:T` | セルフホストの準備 |
+| `maps` | 文字列をキーにした表`maps.Map:V` | セルフホストの準備 |
+| `os` | コマンドの実行、環境変数、ファイルを消す、終了 | セルフホストの準備 |
 | `math` | `sqrt`、`sin`など | 手順6 |
 | `socket` | ソケット | 必要になったとき |
 | `bignum` | 大きな整数 | 手順8 |
@@ -593,7 +607,7 @@ if (b[0] == 'A') {
 
 ### 入出力
 
-`stdio.print(x)`は自動で改行し、`stdio.put(x)`は改行しません。`import stdio;`を書いて使います。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。
+`stdio.print(x)`は自動で改行し、`stdio.put(x)`は改行しません。`import stdio;`を書いて使います。どちらも引数の型から表示方法を決めるので、書式文字列は不要です。`stdio.eprint(x)`と`stdio.eput(x)`は、同じように標準エラー出力に表示します（エラーメッセージ用）。
 
 | 型 | 表示 |
 | --- | --- |
@@ -661,6 +675,23 @@ function nothing main() {
     bignum.print(bignum.add(a, bignum.from(1)));   // 1267650600228229401496703205377
 }
 ```
+- **`strings`:** 位置と長さはバイト単位（UTF-8の1文字は1〜4バイト）
+
+| 関数 | 内容 |
+| --- | --- |
+| `slice(s, start, end)` | `start`バイト目から`end`バイト目の手前まで。範囲の外なら実行時エラー |
+| `find(s, sub, start)` | `start`バイト目から`sub`を探す。なければ`-1` |
+| `contains`、`starts_with`、`ends_with` | 含むか、で始まるか、で終わるか |
+| `split(s, sep)`、`join(parts, sep)` | 分ける、つなぐ |
+| `trim(s)` | 前後の空白（スペース、タブ、改行）を除く |
+| `replace(s, old, new)`、`repeat(s, n)` | 置き換える、`n`回つなぐ |
+| `from_byte(c:8)` | 1バイトの文字列 |
+| `compare(a, b)` | バイトの順で比べる（`-1`、`0`、`1`） |
+| `builder()`、`add(b, s)`、`add_byte(b, c)`、`count(b)`、`text(b)` | 長い文字列を少しずつ作る（`+`でつなぐと、そのたびに全体を写すので遅い） |
+
+- **`lists`:** `l:lists.List:string = lists.new();`のように作る。`push`、`get`、`set`、`pop`、`count`、`clear`、`to_array`。添字が範囲の外なら実行時エラー
+- **`maps`:** `m:maps.Map:32 = maps.new();`のように作る。キーは`string`。`put`、`get`（なければ`null`）、`has`、`remove`、`count`、`keys`（順番は決まっていない）
+- **`os`:** `run(args)`はコマンドを実行して終わるまで待ち、終了コードを返す（実行できなければ`null`。コマンドは`PATH`から探し、標準入出力はそのまま渡す）。`env(name)`は環境変数（なければ`null`）、`remove(path)`はファイルを消す、`exit(code)`はプログラムを終える
 - **組み込み:** `allocate`、`length`、`size`、`copy`、`collect`、`bytes`、`array`は`import`なしで使える。これらの名前は、関数や変数の名前には使えない
 - **暗号:** 可変長の`bignum`は使わず、固定長で定数時間に計算する専用ライブラリを分ける
 

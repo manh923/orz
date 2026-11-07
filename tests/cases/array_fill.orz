@@ -1,0 +1,31 @@
+// exit: 0
+// array(n, 初期値)
+import stdio;
+
+struct P {
+    x:32;
+    name:string;
+}
+
+g:array:32 = array(3, 7);
+
+function nothing main() {
+    a:array:P = array(3, P(1, "a"));
+    a[1] = P(2, "b");
+    stdio.print(a);
+    // 同じ構造体が入る（同じものを指す）
+    a[0].x = 9;
+    stdio.print(a[2].x);
+    b:array:8 = array(4, 65);
+    stdio.print(b);
+    c:array:string = array(2, "x");
+    stdio.print(c);
+    d:array:decnum = array(2, 1.5);
+    stdio.print(d);
+    stdio.print(g);
+    e:array:32 = array(0, 1);
+    stdio.print(e);
+    stdio.put("out1 ");
+    stdio.eprint("標準エラー出力には出るが、標準出力には出ない");
+    stdio.print("out2");
+}

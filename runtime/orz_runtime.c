@@ -55,6 +55,11 @@ __attribute__((noreturn)) static void os_exit(i64 code);
 #define SYS_mmap 9
 #define SYS_munmap 11
 #define SYS_rt_sigaction 13
+#define SYS_pipe2 293
+#define SYS_fork 57
+#define SYS_execve 59
+#define SYS_wait4 61
+#define SYS_unlink 87
 #define SYS_sigaltstack 131
 #define SYS_exit_group 231
 
@@ -150,6 +155,13 @@ IMPORT int WINAPI MultiByteToWideChar(u32 cp, u32 flags, const char *s, int ns, 
 IMPORT void *WINAPI AddVectoredExceptionHandler(u32 first, i64(WINAPI *handler)(void *info));
 IMPORT int WINAPI SetThreadStackGuarantee(u32 *size);
 IMPORT u32 WINAPI GetLastError(void);
+IMPORT int WINAPI DeleteFileW(const u16 *path);
+IMPORT u32 WINAPI GetEnvironmentVariableW(const u16 *name, u16 *buf, u32 size);
+IMPORT int WINAPI SetHandleInformation(HANDLE h, u32 mask, u32 flags);
+IMPORT int WINAPI CreateProcessW(const u16 *app, u16 *cmdline, void *pattr, void *tattr, int inherit, u32 flags,
+                                 void *env, const u16 *dir, void *startup, void *info);
+IMPORT u32 WINAPI WaitForSingleObject(HANDLE h, u32 ms);
+IMPORT int WINAPI GetExitCodeProcess(HANDLE h, u32 *code);
 
 #define CP_UTF8 65001
 
@@ -407,8 +419,11 @@ static void write_all(int fd, const char *p, i64 n) {
     }
 }
 
+// 書き出す先（ふつうは標準出力。eprint・eput の間だけ標準エラー出力）。
+static int out_fd = 1;
+
 void orz_rt_flush(void) {
-    write_all(1, outbuf, outlen);
+    write_all(out_fd, outbuf, outlen);
     outlen = 0;
 }
 
@@ -896,6 +911,19 @@ void *orz_rt_array_new(i64 count, i64 elem_size, i64 kind, i64 scan, const char 
     else if (kind == 2)
         for (i64 i = 0; i < count; i++) data[i] = empty_array.data;
     return data;
+}
+
+// array(n, 初期値)：すべての要素に v を入れる。
+void orz_rt_array_fill(char *a, i64 v, i64 elem_size) {
+    i64 n = ((const i64 *)a)[-1];
+    for (i64 i = 0; i < n; i++) {
+        if (elem_size == 8)
+            ((i64 *)a)[i] = v;
+        else if (elem_size == 4)
+            ((int *)a)[i] = (int)v;
+        else
+            a[i] = (char)v;
+    }
 }
 
 // ---------------- 文字列 ----------------
@@ -1604,6 +1632,16 @@ static void put_value(const char *desc, const void *p, int quote) {
 // v を、型の説明 desc に従って表示する。
 void orz_rt_put(i64 v, const char *desc) { put_value(desc, &v, 0); }
 
+// stdio.eprint・eput：標準エラー出力に表示する。標準出力は先に書き出しておく。
+void orz_rt_eput(i64 v, const char *desc, i64 newline) {
+    orz_rt_flush();
+    out_fd = 2;
+    put_value(desc, &v, 0);
+    if (newline) out("\n", 1);
+    orz_rt_flush();
+    out_fd = 1;
+}
+
 // ---------------- 複製 ----------------
 
 void *orz_rt_copy(const void *p, i64 size) {
@@ -1758,9 +1796,14 @@ char *orz_rt_last_error(void) {
     case 36:
         m = "パスが長すぎます";
         break;
+    case 8:
+        m = "実行できる形式ではありません";
+        break;
     default: {
-        char a[24], *num = fmt_long(a, last_errno);
+        int win = last_errno >= WIN_ERROR_BASE;
+        char a[24], *num = fmt_long(a, win ? last_errno - WIN_ERROR_BASE : last_errno);
         char msg[64] = "エラー（番号 ";
+        if (win) memcpy(msg, "エラー（Windows の番号 ", sizeof "エラー（Windows の番号 ");
         i64 l = cstrlen(msg), k = 0;
         while (num[k]) msg[l++] = num[k++];
         const char *tail = "）";
@@ -1800,10 +1843,247 @@ i64 orz_rt_pow(i64 base, i64 exp, i64 bits, const char *site, const char *overfl
     return r;
 }
 
-// ---------------- 起動 ----------------
+// ---------------- プロセス（標準ライブラリ os などから extern で呼ぶ） ----------------
 
 static i64 g_argc;
 static char **g_argv;
+
+// p から n バイトの文字列を作る（標準ライブラリ strings で使う）。
+char *orz_rt_str_from_bytes(const char *p, i64 n) { return str_from(p, n); }
+
+// 実行時エラーで止まる（標準ライブラリで、範囲外などを知らせる）。
+__attribute__((noreturn)) void orz_rt_fail(const char *msg) {
+    panic_begin(0);
+    err(msg);
+    panic_end();
+}
+
+#ifndef _WIN32
+
+static char **g_envp; // 環境変数（起動時のスタックの、引数の後ろにある）
+
+// 環境変数。なければ null。
+char *orz_rt_env(const char *name) {
+    i64 n = str_len(name);
+    for (char **e = g_envp; e && *e; e++) {
+        const char *v = *e;
+        if (memcmp(v, name, n) == 0 && v[n] == '=') return str_from(v + n + 1, cstrlen(v + n + 1));
+    }
+    return 0;
+}
+
+i64 orz_rt_remove(const char *path) {
+    i64 r = sys3(SYS_unlink, (i64)path, 0, 0);
+    if (r < 0) {
+        last_errno = -r;
+        return 0;
+    }
+    return 1;
+}
+
+// 子のプロセスで、PATH から探して実行する。失敗したら errno を fd に書いて終わる。
+__attribute__((noreturn)) static void exec_child(char **argv, int fd) {
+    static char path[4096];
+    const char *cmd = argv[0];
+    i64 err_no = ENOENT;
+    int has_slash = 0;
+    for (const char *c = cmd; *c; c++)
+        if (*c == '/') has_slash = 1;
+    if (has_slash) {
+        err_no = -sys3(SYS_execve, (i64)cmd, (i64)argv, (i64)g_envp);
+    } else {
+        const char *dirs = "/usr/local/bin:/usr/bin:/bin";
+        for (char **e = g_envp; e && *e; e++)
+            if (memcmp(*e, "PATH=", 5) == 0) dirs = *e + 5;
+        i64 clen = cstrlen(cmd);
+        while (*dirs) {
+            i64 d = 0;
+            while (dirs[d] && dirs[d] != ':') d++;
+            if (d + 1 + clen + 1 <= (i64)sizeof path) {
+                i64 k = 0;
+                if (d == 0) path[k++] = '.';
+                memcpy(path + k, dirs, d);
+                k += d;
+                path[k++] = '/';
+                memcpy(path + k, cmd, clen + 1);
+                i64 r = -sys3(SYS_execve, (i64)path, (i64)argv, (i64)g_envp);
+                // 見つからない以外の理由（権限など）を覚えておく。
+                if (r != ENOENT && r != ENOTDIR) err_no = r;
+            }
+            dirs += d;
+            if (*dirs == ':') dirs++;
+        }
+    }
+    int e32 = (int)err_no;
+    sys3(SYS_write, fd, (i64)&e32, 4);
+    for (;;) sys3(SYS_exit_group, 127, 0, 0);
+}
+
+// コマンドを実行して、終わるまで待つ。終了コード（シグナルで止まったら 128 + 番号）を返す。
+// 実行できなければ -1（理由は last_error）。
+i64 orz_rt_run(char **args) {
+    i64 n = ((const i64 *)args)[-1];
+    if (n == 0) {
+        last_errno = ENOENT;
+        return -1;
+    }
+    char **argv = map((n + 1) * 8, 0);
+    for (i64 i = 0; i < n; i++) argv[i] = args[i];
+    argv[n] = 0;
+    orz_rt_flush();
+    int fds[2];
+    i64 r = sys3(SYS_pipe2, (i64)fds, O_CLOEXEC, 0);
+    if (r < 0) {
+        last_errno = -r;
+        unmap(argv, (n + 1) * 8);
+        return -1;
+    }
+    i64 pid = sys3(SYS_fork, 0, 0, 0);
+    if (pid == 0) {
+        sys3(SYS_close, fds[0], 0, 0);
+        exec_child(argv, fds[1]);
+    }
+    sys3(SYS_close, fds[1], 0, 0);
+    unmap(argv, (n + 1) * 8);
+    if (pid < 0) {
+        sys3(SYS_close, fds[0], 0, 0);
+        last_errno = -pid;
+        return -1;
+    }
+    // 実行できたら、書き込み側が閉じて 0 バイトになる。
+    int child_err = 0;
+    i64 got = os_read(fds[0], (char *)&child_err, 4);
+    sys3(SYS_close, fds[0], 0, 0);
+    int status = 0;
+    while (sys4(SYS_wait4, pid, (i64)&status, 0, 0) == -EINTR) {
+    }
+    if (got == 4) {
+        last_errno = child_err;
+        return -1;
+    }
+    if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
+    return 128 + (status & 0x7f);
+}
+
+#else // _WIN32
+
+static u16 wname[32768];
+
+char *orz_rt_env(const char *name) {
+    i64 n = str_len(name);
+    int w = n == 0 ? 0 : MultiByteToWideChar(CP_UTF8, 0, name, (int)n, wname, 32767);
+    if (w <= 0) return 0;
+    wname[w] = 0;
+    u32 len = GetEnvironmentVariableW(wname, wpath, 32768);
+    if (len == 0 || len >= 32768) return 0;
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, wpath, (int)len, 0, 0, 0, 0);
+    char *s = new_str(bytes);
+    WideCharToMultiByte(CP_UTF8, 0, wpath, (int)len, s, bytes, 0, 0);
+    return s;
+}
+
+i64 orz_rt_remove(const char *path) {
+    if (!to_wide(path)) {
+        last_errno = ENAMETOOLONG;
+        return 0;
+    }
+    if (!DeleteFileW(wpath)) {
+        last_errno = -open_error();
+        return 0;
+    }
+    return 1;
+}
+
+// 引数を、Windows の決まり（parse_command_line の逆）で 1 つのコマンドラインにする。
+static void quote_arg(struct buf *b, const char *a) {
+    i64 n = str_len(a);
+    int plain = n > 0;
+    for (i64 i = 0; i < n; i++)
+        if (a[i] == ' ' || a[i] == '\t' || a[i] == '"') plain = 0;
+    if (plain) {
+        buf_push(b, a, n);
+        return;
+    }
+    buf_push(b, "\"", 1);
+    for (i64 i = 0; i < n; i++) {
+        i64 k = 0;
+        while (i < n && a[i] == '\\') i++, k++;
+        if (i == n) {
+            // 終わりの「"」の前の「\」は 2 倍にする。
+            for (i64 j = 0; j < 2 * k; j++) buf_push(b, "\\", 1);
+            break;
+        }
+        if (a[i] == '"') {
+            for (i64 j = 0; j < 2 * k + 1; j++) buf_push(b, "\\", 1);
+        } else {
+            for (i64 j = 0; j < k; j++) buf_push(b, "\\", 1);
+        }
+        buf_push(b, a + i, 1);
+    }
+    buf_push(b, "\"", 1);
+}
+
+// STARTUPINFOW と PROCESS_INFORMATION
+struct startup_info {
+    u32 cb;
+    void *reserved, *desktop, *title;
+    u32 x, y, xsize, ysize, xcount, ycount, fill, flags;
+    unsigned short show, reserved2_len;
+    void *reserved2;
+    HANDLE in, out, err;
+};
+
+struct process_info {
+    HANDLE process, thread;
+    u32 pid, tid;
+};
+
+_Static_assert(sizeof(struct startup_info) == 104, "STARTUPINFOW の大きさ");
+_Static_assert(sizeof(struct process_info) == 24, "PROCESS_INFORMATION の大きさ");
+
+i64 orz_rt_run(char **args) {
+    i64 n = ((const i64 *)args)[-1];
+    if (n == 0) {
+        last_errno = ENOENT;
+        return -1;
+    }
+    struct buf b = {0, 0, 0};
+    for (i64 i = 0; i < n; i++) {
+        if (i > 0) buf_push(&b, " ", 1);
+        quote_arg(&b, args[i]);
+    }
+    u16 *cmd = map((b.len + 1) * 2, 0);
+    int w = b.len == 0 ? 0 : MultiByteToWideChar(CP_UTF8, 0, b.p, (int)b.len, cmd, (int)b.len);
+    cmd[w] = 0;
+    orz_rt_flush();
+    // 標準入出力を、そのまま子に渡す（STARTF_USESTDHANDLES）。
+    struct startup_info si;
+    struct process_info pi;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.flags = 0x100;
+    HANDLE *std[3] = {&si.in, &si.out, &si.err};
+    for (int k = 0; k < 3; k++) {
+        *std[k] = os_handle(k);
+        SetHandleInformation(*std[k], 1, 1); // HANDLE_FLAG_INHERIT
+    }
+    int ok = CreateProcessW(0, cmd, 0, 0, 1, 0, 0, 0, &si, &pi);
+    unmap(cmd, (b.len + 1) * 2);
+    if (!ok) {
+        last_errno = win_errno(GetLastError());
+        return -1;
+    }
+    WaitForSingleObject(pi.process, 0xffffffffu);
+    u32 code = 0;
+    GetExitCodeProcess(pi.process, &code);
+    CloseHandle(pi.process);
+    CloseHandle(pi.thread);
+    return code & 255;
+}
+
+#endif // _WIN32
+
+// ---------------- 起動 ----------------
 
 // コマンドライン引数を array:string にする。
 void *orz_rt_args(void) {
@@ -1852,6 +2132,7 @@ struct ksigaction {
 static void os_start(i64 *sp) {
     g_argc = sp[0];
     g_argv = (char **)(sp + 1);
+    g_envp = g_argv + g_argc + 1;
     stack_top = (char *)sp;
     static struct kstack ss = {altstack, 0, sizeof altstack};
     static struct ksigaction sa = {on_segv, 0x04000000 /* SA_RESTORER */ | 0x08000000 /* SA_ONSTACK */,

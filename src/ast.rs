@@ -113,6 +113,8 @@ pub struct Func {
     pub exported: bool,
     /// ジェネリクスの型引数（`function T get:T(…)` の `T`）。
     pub type_params: Vec<String>,
+    /// `extern` の関数（中身はランタイムや C の側にある）。
+    pub is_extern: bool,
 }
 
 /// `struct Point { x:32; y:32; }`
@@ -279,7 +281,8 @@ pub enum ExprKind {
     /// `[1, 2, 3]`
     ArrayLit(Vec<Expr>),
     /// `array(n)`
-    ArrayNew(Box<Expr>),
+    /// `array(n)`、`array(n, 初期値)`
+    ArrayNew(Box<Expr>, Option<Box<Expr>>),
     /// `get:32`、`List:32` のように型を付けた関数・構造体の名前。
     Generic(Box<Expr>, TypeExpr),
 }

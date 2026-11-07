@@ -1,0 +1,9 @@
+// ランタイムの関数の宣言（extern のテスト用）
+extern function string orz_rt_str_from_bytes(p:pointer:8, n:64);
+extern function string orz_rt_str_concat(a:string, b:string);
+immutable GREETING:string = "やあ";
+
+struct Pair {
+    a:32;
+    b:32;
+}

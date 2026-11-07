@@ -1,0 +1,5 @@
+// error: `extern` の関数には `maybe:32` 型は使えません
+extern function nothing f(x:maybe:32);
+
+function nothing main() {
+}

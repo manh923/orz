@@ -127,6 +127,10 @@ pub enum Rt {
     ArrayCopy,
     /// GC を今すぐ動かす
     Collect,
+    /// (配列, 値, 要素の大きさ) → すべての要素に値を入れる
+    ArrayFill,
+    /// (値, 型の説明, 改行するか) → 標準エラー出力に表示する
+    EPut,
 }
 
 impl Rt {
@@ -152,6 +156,8 @@ impl Rt {
             Rt::Copy => "orz_rt_copy",
             Rt::ArrayCopy => "orz_rt_array_copy",
             Rt::Collect => "orz_rt_collect",
+            Rt::ArrayFill => "orz_rt_array_fill",
+            Rt::EPut => "orz_rt_eput",
         }
     }
 
@@ -218,6 +224,26 @@ pub enum Inst {
     ArenaPop { n: u32 },
 }
 
+/// `extern` の関数を C の呼び出し方（System V ABI）で呼ぶときの、値の種類。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CType {
+    /// 整数のレジスタで渡す 8 バイトの値（`64`、address、string、array、pointer、構造体）。
+    Word,
+    /// `32`。戻り値は符号を広げる。
+    I32,
+    /// `8` と `bool`。戻り値は 0 を詰める。
+    U8,
+    /// `decnum`。%xmm で渡す。
+    Double,
+}
+
+/// `extern` の関数の、引数と戻り値の種類。
+#[derive(Clone, Debug)]
+pub struct ExternSig {
+    pub params: Vec<CType>,
+    pub ret: Option<CType>,
+}
+
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
@@ -241,6 +267,8 @@ pub struct Function {
     /// 中に別のもの（構造体・配列など）を入れる場所だけを書く。`Load`・`StoreMem` は 1 つ、
     /// 構造体や配列の `copy` は、複製する中身のすべて。arena の持ち出しの検査に使う。
     pub slots: Vec<Vec<u32>>,
+    /// `extern` の関数なら、その呼び出し方（中身はない。`symbol` は C の名前）。
+    pub ext: Option<ExternSig>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

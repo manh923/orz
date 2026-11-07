@@ -1,0 +1,8 @@
+// runtime: lists.get の添字 5 が、長さ 1 の範囲の外です
+import lists;
+
+function nothing main() {
+    l:lists.List:32 = lists.new();
+    lists.push(l, 1);
+    x:32 = lists.get(l, 5);
+}

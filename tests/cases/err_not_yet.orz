@@ -1,6 +1,0 @@
-// error: `extern`はまだ実装していません
-extern function 32 abs(x:32);
-
-function 32 main() {
-    return 0;
-}

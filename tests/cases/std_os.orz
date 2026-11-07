@@ -1,0 +1,26 @@
+// exit: 3
+// 標準ライブラリ os（自分自身を子として実行する）
+import stdio;
+import os;
+
+function nothing main(args:array:string) {
+    if (length(args) > 1) {
+        i:32 = 1;
+        while (i < length(args)) {
+            stdio.print("[" + args[i] + "]");
+            i = i + 1;
+        }
+        os.exit(length(args));
+    }
+    stdio.print("親");
+    stdio.print(os.run([args[0], "a b", "c\"d", "e\\", "日本語"]));
+    stdio.print(os.run(["no_such_command_for_orz_test"]));
+    stdio.print(os.env("NO_SUCH_VARIABLE_FOR_ORZ_TEST"));
+    stdio.print(stdio.write_file("消す.txt", "x"));
+    stdio.print(os.remove("消す.txt"));
+    stdio.print(os.remove("消す.txt"));
+    stdio.print(stdio.last_error());
+    stdio.eprint("これは標準エラー出力");
+    os.exit(3);
+    stdio.print("ここには来ない");
+}

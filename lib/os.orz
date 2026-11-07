@@ -1,0 +1,39 @@
+// os：プログラムの外とのやりとり（標準ライブラリ）
+//
+// import os; で使う。
+//
+//     code:maybe:32 = os.run(["as", "-o", "out.o", "out.s"]);   // 終わるまで待って、終了コードを返す
+//     home:maybe:string = os.env("HOME");
+//     os.remove("out.o");
+//     os.exit(1);
+
+extern function 64 orz_rt_run(args:array:string);
+extern function maybe:string orz_rt_env(name:string);
+extern function bool orz_rt_remove(path:string);
+extern function nothing orz_rt_exit(code:64);
+
+// コマンドを実行して、終わるまで待ち、終了コードを返す（シグナルで止まったら 128 + 番号）。
+// 実行できなければ null（理由は stdio.last_error()）。コマンドは PATH から探す。
+// 標準入出力は、そのまま渡す。
+export function maybe:32 run(args:array:string) {
+    r:64 = orz_rt_run(args);
+    if (r < 0) {
+        return null;
+    }
+    return to:32(r);
+}
+
+// 環境変数。なければ null。
+export function maybe:string env(name:string) {
+    return orz_rt_env(name);
+}
+
+// ファイルを消す。できなければ false（理由は stdio.last_error()）。
+export function bool remove(path:string) {
+    return orz_rt_remove(path);
+}
+
+// プログラムを終える。表示しかけのものは書き出す。終了コードは 0〜255。
+export function nothing exit(code:32) {
+    orz_rt_exit(to:64(code));
+}

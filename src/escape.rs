@@ -327,6 +327,10 @@ impl<'a> Analyzer<'a> {
 
     fn run(&mut self) {
         let f = self.f;
+        if f.ext.is_some() {
+            // extern の関数には中身がない。
+            return;
+        }
         let n = f.insts.len();
         let mut label_at = HashMap::new();
         for (i, inst) in f.insts.iter().enumerate() {
@@ -455,6 +459,15 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
+            // extern の関数が返すものは、そこで新しく作ったものとみなす（中は調べられない）。
+            Inst::Call { dst, func, .. } if self.prog.funcs[*func as usize].ext.is_some() => {
+                if let Some(d) = dst {
+                    if f.ptr_temps[*d as usize] {
+                        let here = self.here(i);
+                        self.set(*d, Val::exact(here));
+                    }
+                }
+            }
             Inst::Call { dst, func, args } => self.call(i, st, *dst, &[*func], args),
             Inst::CallIndirect { dst, args, .. } => {
                 let indirect = self.indirect;
@@ -489,6 +502,16 @@ impl<'a> Analyzer<'a> {
                             }
                         }
                     }
+                    // 配列のすべての要素に、値を入れる。
+                    Rt::ArrayFill => {
+                        let (arr, v) = (self.val(st, args[0]), self.val(st, args[1]));
+                        self.check(i, Kind::Outlive, v.hi, arr.lo, Why::Heap);
+                        for &k in &f.slots[i] {
+                            if self.pure(k) {
+                                self.check(i, Kind::Same(k), arr.hi, v.lo, Why::Heap);
+                            }
+                        }
+                    }
                     // maybe:32 などの箱は、arena の中でも GC 側に作る。
                     Rt::Box
                     | Rt::StrToInt
@@ -498,7 +521,8 @@ impl<'a> Analyzer<'a> {
                     | Rt::Put
                     | Rt::Newline
                     | Rt::WriteFile
-                    | Rt::Collect => {}
+                    | Rt::Collect
+                    | Rt::EPut => {}
                 }
             }
             Inst::Ret(Some(v)) => {

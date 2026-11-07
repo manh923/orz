@@ -29,7 +29,13 @@ const RUNTIME_LINUX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runti
 const RUNTIME_WINDOWS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime_windows.o"));
 
 /// orz で書いた標準ライブラリ（`import bignum;` などで読む）。
-const STD_LIBS: &[(&str, &str)] = &[("bignum", include_str!("../lib/bignum.orz"))];
+const STD_LIBS: &[(&str, &str)] = &[
+    ("bignum", include_str!("../lib/bignum.orz")),
+    ("strings", include_str!("../lib/strings.orz")),
+    ("lists", include_str!("../lib/lists.orz")),
+    ("maps", include_str!("../lib/maps.orz")),
+    ("os", include_str!("../lib/os.orz")),
+];
 
 /// orz が動いている OS。
 const HOST: Os = if cfg!(windows) { Os::Windows } else { Os::Linux };
@@ -42,7 +48,8 @@ const USAGE: &str = "使い方:
 
 オプション:
   --no-gc              GC を動かさず、終了時にまとめて解放する（すぐ終わるプログラム向け）
-  --target 名前        linux か windows。どの OS 向けに作るか（ふつうは、今の OS）";
+  --target 名前        linux か windows。どの OS 向けに作るか（ふつうは、今の OS）
+  --link ファイル      一緒にリンクするオブジェクトやライブラリ（extern の関数の中身。何度でも書ける）";
 
 struct Options {
     cmd: String,
@@ -54,6 +61,8 @@ struct Options {
     no_gc: bool,
     /// どの OS 向けに作るか。
     target: Os,
+    /// 一緒にリンクするファイル（extern の関数の中身）。
+    link: Vec<PathBuf>,
 }
 
 fn parse_args() -> Options {
@@ -72,8 +81,16 @@ fn parse_args() -> Options {
     let mut no_fold = false;
     let mut no_gc = false;
     let mut target = HOST;
+    let mut link = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--link" => match args.next() {
+                Some(f) => link.push(PathBuf::from(f)),
+                None => {
+                    eprintln!("`--link` の後にファイルの名前が必要です");
+                    exit(2);
+                }
+            },
             "--target" => {
                 target = match args.next().as_deref() {
                     Some("linux") => Os::Linux,
@@ -108,6 +125,7 @@ fn parse_args() -> Options {
         no_fold,
         no_gc,
         target,
+        link,
     }
 }
 
@@ -224,13 +242,49 @@ impl Files {
         self.srcs.push(SourceFile::new(name, text));
         self.paths.push(canon);
         let lexed = lexer::lex(&self.srcs[index].text, index as u32)?;
-        self.progs.push(parser::parse(lexed.tokens)?);
+        let mut prog = parser::parse(lexed.tokens)?;
+        if self.srcs[index].name.ends_with(".orh") {
+            header_items(&mut prog)?;
+        }
+        self.progs.push(prog);
         Ok(index)
     }
 }
 
+/// `.orh`（宣言だけを書くファイル）に書けるのは、`extern` の関数、構造体、`immutable` だけ。
+/// 読み込むためのファイルなので、すべて `export` したものとみなす。
+fn header_items(prog: &mut ast::Program) -> Result<(), source::Diag> {
+    for item in &mut prog.items {
+        let bad = match item {
+            ast::Item::Func(f) if f.is_extern => {
+                f.exported = true;
+                None
+            }
+            ast::Item::Func(f) => Some(f.name_span),
+            ast::Item::Struct(st) => {
+                st.exported = true;
+                None
+            }
+            ast::Item::Global(d) if d.immutable => {
+                d.exported = true;
+                None
+            }
+            ast::Item::Global(d) => Some(d.name_span),
+            ast::Item::Import(imp) => Some(imp.span),
+        };
+        if let Some(span) = bad {
+            return Err(source::Diag::new(
+                span,
+                "`.orh` に書けるのは、`extern` の関数、`struct`、`immutable` だけです",
+            )
+            .hint("中身のある関数や変数は `.orz` に書きます"));
+        }
+    }
+    Ok(())
+}
+
 /// アセンブルしてリンクする。
-fn assemble_and_link(asm: &str, out: &Path, os: Os) {
+fn assemble_and_link(asm: &str, out: &Path, os: Os, extra: &[PathBuf]) {
     let (runtime, cross_cc) = match os {
         Os::Linux => (RUNTIME_LINUX, "x86_64-linux-gnu-gcc"),
         Os::Windows => (RUNTIME_WINDOWS, "x86_64-w64-mingw32-gcc"),
@@ -263,7 +317,7 @@ fn assemble_and_link(asm: &str, out: &Path, os: Os) {
     let (as_, ld) = (format!("{}as", prefix), format!("{}ld", prefix));
     run_tool(Command::new(&as_).arg("-o").arg(&o).arg(&s), &as_);
     let mut link = Command::new(&ld);
-    link.arg("-o").arg(out).arg(&o).arg(&rt);
+    link.arg("-o").arg(out).arg(&o).args(extra).arg(&rt);
     if os == Os::Windows {
         // スタックは Linux と同じ 8MB にする（Windows のふつうは 1MB）。
         link.args(["-e", "_start", "--subsystem", "console", "--stack", "8388608"]);
@@ -383,7 +437,7 @@ fn main() {
                 // 拡張子がないファイルだと、元のファイルを上書きしてしまう。
                 out = opt.input.with_extension("out");
             }
-            assemble_and_link(&asm, &out, opt.target);
+            assemble_and_link(&asm, &out, opt.target, &opt.link);
         }
         "run" => {
             if opt.target != HOST {
@@ -397,7 +451,7 @@ fn main() {
                 std::env::temp_dir().join(format!("orz-run-{}", std::process::id())),
                 opt.target,
             );
-            assemble_and_link(&asm, &out, opt.target);
+            assemble_and_link(&asm, &out, opt.target, &opt.link);
             let status = Command::new(&out).status();
             let _ = std::fs::remove_file(&out);
             match status {
