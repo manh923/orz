@@ -1,0 +1,41 @@
+{
+  "name": "orz",
+  "displayName": "orz（土下座）",
+  "description": "orz 言語の色分け",
+  "version": "0.1.0",
+  "publisher": "orz-lang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manh923/orz"
+  },
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "orz",
+        "aliases": [
+          "orz",
+          "土下座"
+        ],
+        "extensions": [
+          ".orz",
+          ".orh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "orz",
+        "scopeName": "source.orz",
+        "path": "./syntaxes/orz.tmLanguage.json"
+      }
+    ]
+  }
+}

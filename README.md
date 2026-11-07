@@ -106,6 +106,10 @@ C コンパイラが `cc` という名前で見つからなければ、`CC=gcc c
 
 `--target linux` か `--target windows` で、ほかの OS 向けの実行ファイルを作れます。Linux から Windows 向けに作るには、orz を作るときに `x86_64-w64-mingw32-gcc` が、使うときに `x86_64-w64-mingw32-as` と `x86_64-w64-mingw32-ld` が要ります（Ubuntu なら `gcc-mingw-w64-x86-64`）。
 
+### VS Code
+
+色分けの拡張機能が [editors/vscode](editors/vscode) にあります。`Ctrl+Shift+P` →「Extensions: Install from VSIX...」で、`editors/vscode/orz-0.1.0.vsix` を選ぶと入ります。
+
 ## テスト
 
 ```sh
@@ -139,4 +143,5 @@ cargo test
 | `src/x86.rs` | x86-64 のアセンブリを出す |
 | `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わない。OS とのやりとり（Linux はシステムコール、Windows は kernel32）は「OS」の節にまとめてある |
 | `build.rs` | ランタイムを OS ごとにコンパイルして、コンパイラに埋め込む |
+| `editors/vscode/` | VS Code の拡張機能（色分け） |
 | `lib/*.orz` | orz で書いた標準ライブラリ（bignum、strings、lists、maps、os）。コンパイラに埋め込む |
