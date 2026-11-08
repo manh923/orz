@@ -1,0 +1,7 @@
+// error: 構造体の計算は関数で書きます（bignum なら `bignum.mod(a, b)`）
+import bignum;
+
+function nothing main() {
+    a:bignum.Big = bignum.from(5);
+    b:bignum.Big = a % a;
+}

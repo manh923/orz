@@ -2750,6 +2750,22 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ty::Bool => d.hint("真偽の演算には `and`・`or`・`not` などを使います"),
                 Ty::Str => d.hint("文字列でできるのは `+`（連結）と `==`・`!=` だけです"),
                 Ty::Maybe(_) => maybe_hint(d),
+                Ty::Struct(..) => d.hint(match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => format!(
+                        "構造体の計算は関数で書きます（bignum なら `bignum.{}(a, b)`）",
+                        match op {
+                            BinOp::Add => "add",
+                            BinOp::Sub => "sub",
+                            BinOp::Mul => "mul",
+                            BinOp::Div => "div",
+                            _ => "mod",
+                        }
+                    ),
+                    BinOp::Pow => {
+                        "構造体の計算は関数で書きます（bignum なら `bignum.pow(a, n)`）".to_string()
+                    }
+                    _ => "構造体の計算は関数で書きます".to_string(),
+                }),
                 t if t.contains_param() => d.hint(PARAM_HINT),
                 _ => d,
             });
@@ -2904,14 +2920,22 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         b: bv,
                     });
                 } else {
-                    return Err(Diag::new(
+                    let d = Diag::new(
                         e.span,
                         format!(
                             "`{}` で大小を比べられるのは数だけですが、この式は `{}` 型です",
                             op.as_str(),
                             t.name()
                         ),
-                    ));
+                    );
+                    return Err(match t {
+                        Ty::Struct(..) => d.hint(format!(
+                            "構造体は関数で比べます（bignum なら `bignum.compare(a, b) {} 0`）",
+                            op.as_str()
+                        )),
+                        Ty::Str => d.hint("文字列の順番は `strings.compare(a, b)` で比べます"),
+                        _ => d,
+                    });
                 }
             }
         }
