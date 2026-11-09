@@ -1,0 +1,175 @@
+// random：乱数（標準ライブラリ）
+//
+// import random; で使う。ゲーム・シミュレーション・数値計算用の、速い乱数。
+//
+//     dice:32 = random.between(1, 6);       // サイコロ（1〜6）
+//     n:32 = random.below(10);              // 0〜9
+//     x:decnum = random.fraction();         // 0 以上 1 未満
+//     random.shuffle(cards);                // 並びをばらばらにする
+//
+// 何もしなければ、実行するたびに違う並びになる。random.seed(123) のように種を決めると、毎回同じ並びになる。
+//
+// 注意：暗号には使えない（出た数から、次の数を当てられる）。
+// 合言葉・トークン・鍵には crypto の乱数を使う。
+//
+// 作り方は xoshiro256**（David Blackman と Sebastiano Vigna によるもの。パブリックドメイン）。
+
+import "entropy.orz";
+
+extern function nothing orz_rt_fail(msg:string);
+
+// 今の状態（256 ビット）。
+s0:64 = 0;
+s1:64 = 0;
+s2:64 = 0;
+s3:64 = 0;
+seeded:bool = false;
+
+// 種を決める。同じ種なら、同じ並びになる。
+export function nothing seed(n:64) {
+    // 種を splitmix64 で 4 つに広げる。
+    x:64 = n;
+    x = wadd(x, -7046029254386353131);
+    s0 = mix(x);
+    x = wadd(x, -7046029254386353131);
+    s1 = mix(x);
+    x = wadd(x, -7046029254386353131);
+    s2 = mix(x);
+    x = wadd(x, -7046029254386353131);
+    s3 = mix(x);
+    seeded = true;
+}
+
+// 64 ビットの乱数（負の数も出る）。
+export function 64 next_64() {
+    if (not seeded) {
+        // 種を決めていなければ、OS の乱数から決める。
+        b:array:8 = array(8);
+        entropy.fill(b);
+        v:64 = 0;
+        i:32 = 0;
+        while (i < 8) {
+            v = (v << 8) or to:64(b[i]);
+            i = i + 1;
+        }
+        seed(v);
+    }
+    result:64 = mul9(rotl(mul5(s1), 7));
+    t:64 = s1 << 17;
+    s2 = s2 xor s0;
+    s3 = s3 xor s1;
+    s1 = s1 xor s2;
+    s0 = s0 xor s3;
+    s2 = s2 xor t;
+    s3 = rotl(s3, 45);
+    return result;
+}
+
+// 0 以上 n 未満の乱数（どの数も同じ確からしさ）。n が 1 より小さければ実行時エラー。
+export function 32 below(n:32) {
+    if (n < 1) {
+        orz_rt_fail("random.below に 1 より小さい数 " + to:string(n) + " が渡されました");
+    }
+    return to:32(below_64(to:64(n)));
+}
+
+// lo 以上 hi 以下の乱数（両端を含む）。サイコロなら between(1, 6)。
+export function 32 between(lo:32, hi:32) {
+    if (lo > hi) {
+        orz_rt_fail("random.between の範囲が逆です（" + to:string(lo) + " から " + to:string(hi) + "）");
+    }
+    return to:32(to:64(lo) + below_64(to:64(hi) - to:64(lo) + 1));
+}
+
+// 0 以上 1 未満の乱数。
+export function decnum fraction() {
+    return to:decnum(lsr(next_64(), 11)) * 1.1102230246251565e-16;
+}
+
+// 半々で true か false。
+export function bool coin() {
+    return next_64() < 0;
+}
+
+// 配列の並びを、ばらばらにする（その配列を書き換える）。
+export function nothing shuffle:T(a:array:T) {
+    i:32 = length(a) - 1;
+    while (i > 0) {
+        j:32 = below(i + 1);
+        t:T = a[i];
+        a[i] = a[j];
+        a[j] = t;
+        i = i - 1;
+    }
+}
+
+// 配列から 1 つ選ぶ。空の配列なら実行時エラー。
+export function T pick:T(a:array:T) {
+    if (length(a) == 0) {
+        orz_rt_fail("random.pick に空の配列が渡されました");
+    }
+    return a[below(length(a))];
+}
+
+// ---------------- 中で使うもの ----------------
+
+// 0 以上 n 未満（1 <= n <= 2^62）。上の方の半端な分は捨てて取り直す（偏りをなくすため）。
+function 64 below_64(n:64) {
+    limit:64 = (4611686018427387904 / n) * n;
+    while (true) {
+        v:64 = lsr(next_64(), 2);
+        if (v < limit) {
+            return v % n;
+        }
+    }
+}
+
+// 整数の計算はあふれると止まるので、あふれた分を捨てる計算は、32 ビットずつに分けて行う。
+
+// a + b（あふれた分は捨てる）。
+function 64 wadd(a:64, b:64) {
+    lo:64 = (a and 4294967295) + (b and 4294967295);
+    hi:64 = ((a >> 32) and 4294967295) + ((b >> 32) and 4294967295) + (lo >> 32);
+    return (hi << 32) or (lo and 4294967295);
+}
+
+// a × b（あふれた分は捨てる）。
+function 64 wmul(a:64, b:64) {
+    al:64 = a and 4294967295;
+    ah:64 = (a >> 32) and 4294967295;
+    bl:64 = b and 4294967295;
+    bh:64 = (b >> 32) and 4294967295;
+    cross:64 = (mul32(ah, bl) and 4294967295) + (mul32(al, bh) and 4294967295);
+    return wadd(mul32(al, bl), cross << 32);
+}
+
+// 32 ビットどうしの掛け算（結果は 64 ビット）。
+function 64 mul32(a:64, b:64) {
+    return wadd((a and 65535) * b, ((a >> 16) * b) << 16);
+}
+
+function 64 mul5(x:64) {
+    return wadd(x << 2, x);
+}
+
+function 64 mul9(x:64) {
+    return wadd(x << 3, x);
+}
+
+// 右にずらす（上には 0 を入れる）。1 <= n <= 63。
+function 64 lsr(x:64, n:64) {
+    return (x >> n) and not (-1 << (64 - n));
+}
+
+// 左に k ビット回す。1 <= k <= 63。
+function 64 rotl(x:64, k:64) {
+    return (x << k) or lsr(x, 64 - k);
+}
+
+// splitmix64 の混ぜ方。
+function 64 mix(x:64) {
+    z:64 = x;
+    z = wmul(z xor lsr(z, 30), -4658895280553007687);
+    z = wmul(z xor lsr(z, 27), -7723592293110705685);
+    return z xor lsr(z, 31);
+}

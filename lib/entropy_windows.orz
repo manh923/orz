@@ -1,0 +1,16 @@
+// OS の安全な乱数（Windows）。crypto と random が使う。
+extern "bcrypt.dll" function 32 BCryptGenRandom(algorithm:address, buf:array:8, n:32, flags:32);
+
+extern function nothing orz_rt_fail(msg:string);
+
+// buf を、予測できない乱数で埋める。
+export function nothing fill(buf:array:8) {
+    if (length(buf) == 0) {
+        return;
+    }
+    // 2 は BCRYPT_USE_SYSTEM_PREFERRED_RNG（OS の決めた乱数の作り方を使う）。
+    status:32 = BCryptGenRandom(0, buf, length(buf), 2);
+    if (status != 0) {
+        orz_rt_fail("OS から乱数を取れません（BCryptGenRandom のエラー " + to:string(status) + "）");
+    }
+}

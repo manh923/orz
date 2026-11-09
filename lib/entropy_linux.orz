@@ -1,0 +1,31 @@
+// OS の安全な乱数（Linux）。crypto と random が使う。
+import sys;
+
+extern function nothing orz_rt_fail(msg:string);
+
+// buf を、予測できない乱数で埋める。
+export function nothing fill(buf:array:8) {
+    // getrandom（番号 318）。256 バイトまでなら、途中で切れずに全部入る。
+    piece:array:8 = array(256);
+    done:32 = 0;
+    while (done < length(buf)) {
+        want:32 = length(buf) - done;
+        if (want > 256) {
+            want = 256;
+        }
+        r:64 = sys.call(318, piece, want, 0);
+        if (r == -4) {
+            // シグナルで中断されたら、やり直す。
+            continue;
+        }
+        if (r <= 0) {
+            orz_rt_fail("OS から乱数を取れません（getrandom のエラー " + to:string(r) + "）");
+        }
+        i:32 = 0;
+        while (i < to:32(r)) {
+            buf[done + i] = piece[i];
+            i = i + 1;
+        }
+        done = done + to:32(r);
+    }
+}

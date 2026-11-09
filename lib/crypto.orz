@@ -1,0 +1,63 @@
+// crypto：暗号用（標準ライブラリ）
+//
+// import crypto; で使う。今あるのは、OS の安全な乱数（予測できない乱数）だけ。
+// 合言葉・トークン・鍵のように、人に当てられては困るものに使う。
+// ゲームやシミュレーションの乱数は、速くて種を決められる random を使う。
+//
+//     token:string = crypto.random_hex(16);      // 32 文字の 16 進（16 バイト分）
+//     key:array:8 = crypto.random_bytes(32);
+//     n:32 = crypto.random_below(100);            // 0〜99
+
+import "entropy.orz";
+import strings;
+
+extern function nothing orz_rt_fail(msg:string);
+
+// n バイトの乱数。
+export function array:8 random_bytes(n:32) {
+    buf:array:8 = array(n);
+    entropy.fill(buf);
+    return buf;
+}
+
+// 64 ビットの乱数（負の数も出る）。
+export function 64 random_64() {
+    b:array:8 = random_bytes(8);
+    v:64 = 0;
+    i:32 = 0;
+    while (i < 8) {
+        v = (v << 8) or to:64(b[i]);
+        i = i + 1;
+    }
+    return v;
+}
+
+// 0 以上 n 未満の乱数（どの数も同じ確からしさ）。n が 1 より小さければ実行時エラー。
+export function 32 random_below(n:32) {
+    if (n < 1) {
+        orz_rt_fail("crypto.random_below に 1 より小さい数 " + to:string(n) + " が渡されました");
+    }
+    // 上の方の半端な分は捨てて取り直す（偏りをなくすため）。
+    span:64 = to:64(n);
+    limit:64 = (4611686018427387904 / span) * span;
+    while (true) {
+        v:64 = (random_64() >> 2) and 4611686018427387903;
+        if (v < limit) {
+            return to:32(v % span);
+        }
+    }
+}
+
+// n バイトの乱数を、16 進の文字列（2n 文字）にする。
+export function string random_hex(n:32) {
+    digits:pointer:8 = bytes("0123456789abcdef");
+    raw:array:8 = random_bytes(n);
+    b:strings.Builder = strings.builder();
+    i:32 = 0;
+    while (i < n) {
+        strings.add_byte(b, digits[to:32(raw[i]) / 16]);
+        strings.add_byte(b, digits[to:32(raw[i]) % 16]);
+        i = i + 1;
+    }
+    return strings.text(b);
+}

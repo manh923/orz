@@ -767,13 +767,13 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     "sys" => (ModRef::Sys, name.clone()),
                     // orz で書いた標準ライブラリ（読み込むときに埋めてある）。
                     _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
-                    "math" | "socket" | "http" => {
+                    "http" => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
-                            .hint("今使えるのは stdio、strings、lists、maps、os、bignum です"))
+                            .hint("標準ライブラリの一覧は、SPEC.md の「標準ライブラリ」にあります"))
                     }
                     _ => {
                         return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
-                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます（今使える標準ライブラリは stdio と bignum です）"))
+                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます"))
                     }
                 },
                 ImportTarget::File(path) => {

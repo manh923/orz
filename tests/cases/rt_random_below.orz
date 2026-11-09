@@ -1,0 +1,6 @@
+// runtime: random.below に 1 より小さい数 0 が渡されました
+import random;
+
+function nothing main() {
+    n:32 = random.below(0);
+}

@@ -1,5 +1,5 @@
-// error: 標準ライブラリ `math` はまだありません
-import math;
+// error: 標準ライブラリ `http` はまだありません
+import http;
 
 function nothing main() {
 }

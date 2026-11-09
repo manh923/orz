@@ -1,0 +1,41 @@
+// exit: 0
+// 標準ライブラリ random（数値計算・ゲーム用）と crypto（OS の安全な乱数）
+import stdio;
+import random;
+import crypto;
+
+function nothing main() {
+    // 種を決めると、いつも同じ並びになる（xoshiro256** の決まった並び）
+    random.seed(12345);
+    i:32 = 0;
+    while (i < 5) {
+        stdio.print(random.next_64());
+        i = i + 1;
+    }
+    stdio.print(random.between(1, 6));
+    stdio.print(random.below(10));
+    stdio.print(random.fraction());
+    a:array:32 = [1, 2, 3, 4, 5, 6, 7, 8];
+    random.shuffle(a);
+    stdio.print(a);
+    stdio.print(random.pick(["a", "b", "c"]));
+    stdio.print(random.coin());
+    // 範囲に入っているか
+    ok:bool = true;
+    i = 0;
+    while (i < 10000) {
+        d:32 = random.between(-3, 3);
+        f:decnum = random.fraction();
+        if (d < -3 or d > 3 or f < 0.0 or f >= 1.0 or random.below(7) > 6) {
+            ok = false;
+        }
+        i = i + 1;
+    }
+    stdio.print(ok);
+    stdio.print(random.between(5, 5));
+    // crypto：実行するたびに違うので、形だけ確かめる
+    stdio.print(length(crypto.random_bytes(40)));
+    stdio.print(length(crypto.random_hex(16)));
+    stdio.print(crypto.random_below(5) < 5);
+    stdio.print(crypto.random_64() != crypto.random_64());
+}
