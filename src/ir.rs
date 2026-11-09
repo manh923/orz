@@ -212,6 +212,8 @@ pub enum Inst {
     CallRt { dst: Option<u32>, func: Rt, args: Vec<Operand>, span: Span },
     /// 関数ポインタで呼ぶ。
     CallIndirect { dst: Option<u32>, target: Operand, args: Vec<Operand> },
+    /// Linux のシステムコール（`sys.call`）。`args[0]` が番号で、残りが引数（6 個まで）。
+    Syscall { dst: u32, args: Vec<Operand> },
     Label(u32),
     Jump(u32),
     /// `cond` が 0 でなければ `then` へ、0 なら `els` へ。
@@ -242,6 +244,8 @@ pub enum CType {
 pub struct ExternSig {
     pub params: Vec<CType>,
     pub ret: Option<CType>,
+    /// Windows の DLL の関数なら、DLL の名前。Windows の呼び出し方で呼ぶ。
+    pub dll: Option<String>,
 }
 
 #[derive(Debug)]

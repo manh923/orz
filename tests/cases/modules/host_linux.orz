@@ -1,0 +1,14 @@
+// Linux 向け
+import sys;
+
+export function string name() {
+    return "linux";
+}
+
+export function bool has_pid() {
+    return sys.call(39) > 0;
+}
+
+export function 64 check() {
+    return 0;
+}

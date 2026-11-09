@@ -103,11 +103,21 @@ impl Parser {
             Tok::Kw(Kw::Export) => return Err(Diag::new(self.span(), "`export` が 2 つ続いています")),
             Tok::Kw(Kw::Extern) => {
                 self.bump();
+                // `extern "kernel32.dll" function …` は、Windows の DLL の関数。
+                let dll = match self.peek().clone() {
+                    Tok::Str(name) => {
+                        self.bump();
+                        Some(String::from_utf8_lossy(&name).into_owned())
+                    }
+                    _ => None,
+                };
                 if self.peek() != &Tok::Kw(Kw::Function) {
                     return Err(Diag::new(self.span(), "`extern` の後には `function` を書きます")
                         .hint("例：extern function 64 orz_rt_run(args:array:string);"));
                 }
-                Item::Func(self.func_with(true)?)
+                let mut f = self.func_with(true)?;
+                f.dll = dll;
+                Item::Func(f)
             }
             Tok::Kw(Kw::Immutable) => {
                 self.bump();
@@ -272,6 +282,7 @@ impl Parser {
             exported: false,
             type_params,
             is_extern,
+            dll: None,
         })
     }
 

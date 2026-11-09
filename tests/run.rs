@@ -6,6 +6,7 @@
 //!   // runtime: 文字列   実行時エラーになり、その文字列が表示される
 //!   // flags: --no-fold   定数の畳み込みを切ってコンパイルする（実行時の検査を試すため）。ほかのオプションも書ける
 //!   // args: a b c       実行するときのコマンドライン引数
+//!   // os: linux         その OS 向けのときだけ試す（linux か windows）
 //!
 //! 同じ名前の `.out` があれば、標準出力がその中身とぴったり同じかを確かめる。
 //! 同じ名前の `.in` があれば、それを標準入力に流す。
@@ -126,6 +127,15 @@ fn check_stdout(case: &Path, run: &Run) -> Result<(), String> {
 
 fn check(case: &Path, dir: &Path) -> Result<(), String> {
     let src = std::fs::read_to_string(case).unwrap();
+    // ほかの OS 向けのテストは飛ばす。
+    let target = if cfg!(windows) || on_wine() {
+        "windows"
+    } else {
+        "linux"
+    };
+    if header(&src, "os:").is_some_and(|os| os != target) {
+        return Ok(());
+    }
     if let Some(exit) = header(&src, "exit:") {
         let want: i32 = exit.parse().unwrap();
         for no_fold in [false, true] {

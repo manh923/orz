@@ -1,0 +1,17 @@
+// exit: 0
+// OS 別のファイル：modules/host_linux.orz と modules/host_windows.orz の、作る OS に合うほうを読む。
+// Linux 向けは sys.call、Windows 向けは extern "…dll" で DLL の関数を呼ぶ。
+import stdio;
+import "modules/host.orz";
+
+function nothing main() {
+    name:string = host.name();
+    stdio.print(name == "linux" or name == "windows");
+    stdio.print(host.has_pid());
+    // Windows では、DLL の関数のいろいろな呼び出し方（引数が多い、小数）を確かめる
+    if (name == "windows") {
+        stdio.print(host.check() == 5);
+    } else {
+        stdio.print(host.check() == 0);
+    }
+}

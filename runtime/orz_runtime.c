@@ -1445,6 +1445,9 @@ i64 orz_rt_fpow(i64 a, i64 b, const char *site) {
     } else if (x == 0) {
         if (y < 0) orz_rt_panic(site, "0 を負の数で累乗しました");
         r = is_odd_integer(y) ? x : 0.0;
+    } else if (y == 0.5 && x > 0) {
+        // 平方根は、CPU の命令で正確に（正しく丸めて）求める。
+        __asm__("sqrtsd %1, %0" : "=x"(r) : "x"(x));
     } else {
         int neg = 0;
         long double ax = x;
@@ -1799,6 +1802,31 @@ char *orz_rt_last_error(void) {
     case 8:
         m = "実行できる形式ではありません";
         break;
+    case 22:
+        m = "値が正しくありません";
+        break;
+    case 32:
+        m = "相手が接続を閉じました";
+        break;
+    case 98:
+        m = "そのアドレス（ポート）は、すでに使われています";
+        break;
+    case 99:
+        m = "そのアドレスは、このコンピュータでは使えません";
+        break;
+    case 101:
+    case 113:
+        m = "相手に届く経路がありません";
+        break;
+    case 104:
+        m = "相手に接続を切られました";
+        break;
+    case 110:
+        m = "時間切れです";
+        break;
+    case 111:
+        m = "接続を断られました（相手が待ち受けていません）";
+        break;
     default: {
         int win = last_errno >= WIN_ERROR_BASE;
         char a[24], *num = fmt_long(a, win ? last_errno - WIN_ERROR_BASE : last_errno);
@@ -1850,6 +1878,9 @@ static char **g_argv;
 
 // p から n バイトの文字列を作る（標準ライブラリ strings で使う）。
 char *orz_rt_str_from_bytes(const char *p, i64 n) { return str_from(p, n); }
+
+// 失敗の理由（Linux の errno の番号）を覚える。orz で書いた標準ライブラリから呼ぶ。stdio.last_error() で取れる。
+void orz_rt_set_error(i64 code) { last_errno = code; }
 
 // 実行時エラーで止まる（標準ライブラリで、範囲外などを知らせる）。
 __attribute__((noreturn)) void orz_rt_fail(const char *msg) {

@@ -1,0 +1,23 @@
+// exit: 0
+// os: linux
+// sys.call（Linux のシステムコール）と、decnum のビットの読み替え
+import stdio;
+import sys;
+
+function nothing main() {
+    // write(1, "hi\n", 3)
+    n:64 = sys.call(1, 1, "hi\n", 3);
+    stdio.print(n);
+    // getpid（番号 39）
+    pid:64 = sys.call(39);
+    stdio.print(pid > 0);
+    // 失敗は負の数（-EBADF = -9）
+    stdio.print(sys.call(3, 12345));
+    // 6 個の引数：mmap(0, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    p:64 = sys.call(9, 0, 4096, 3, 34, -1, 0);
+    stdio.print(p > 0);
+    stdio.print(sys.call(11, p, 4096));
+    stdio.print(sys.bits(1.0));
+    stdio.print(sys.from_bits(4611686018427387904));
+    stdio.print(sys.bits(-0.0) == -9223372036854775807 - 1);
+}

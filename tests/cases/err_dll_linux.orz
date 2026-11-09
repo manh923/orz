@@ -1,0 +1,6 @@
+// error: `pow` は Windows の DLL（msvcrt.dll）の関数なので、Linux 向けには使えません
+// os: linux
+extern "msvcrt.dll" function decnum pow(x:decnum, y:decnum);
+
+function nothing main() {
+}

@@ -115,6 +115,8 @@ pub struct Func {
     pub type_params: Vec<String>,
     /// `extern` の関数（中身はランタイムや C の側にある）。
     pub is_extern: bool,
+    /// `extern "kernel32.dll" function …` の DLL の名前（Windows の DLL の関数）。
+    pub dll: Option<String>,
 }
 
 /// `struct Point { x:32; y:32; }`

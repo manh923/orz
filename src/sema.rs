@@ -19,6 +19,7 @@ use crate::ast::*;
 use crate::fold;
 use crate::ir::{self, CmpOp, ConstVal, FOp, Inst, IrBinOp, Operand, Place, Rt, Width};
 use crate::source::{Diag, Span};
+use crate::x86::Os;
 
 /// 値の型。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -254,6 +255,8 @@ enum TopName {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModRef {
     Stdio,
+    /// `import sys;`：OS や CPU に直接頼むもの（コンパイラが知っている）。
+    Sys,
     File(usize),
 }
 
@@ -267,10 +270,13 @@ struct ModInfo<'p> {
 /// 名前（`name` か `ns.name`）が指すもの。
 enum Target {
     Stdio,
+    Sys,
     Top(TopName),
 }
 
 struct Ctx<'p> {
+    /// どの OS 向けに作るか。
+    os: Os,
     mods: Vec<ModInfo<'p>>,
     funcs: Vec<FuncInfo<'p>>,
     generic_funcs: Vec<GenericFunc<'p>>,
@@ -394,6 +400,7 @@ impl<'p> Ctx<'p> {
         };
         let m2 = match r {
             ModRef::Stdio => return Ok(Target::Stdio),
+            ModRef::Sys => return Ok(Target::Sys),
             ModRef::File(m2) => m2,
         };
         let Some(top) = self.top(m2, name) else {
@@ -731,8 +738,9 @@ fn subst(ctx: &Ctx, t: &Ty, bind: &[Ty]) -> Option<Ty> {
 }
 
 /// `modules[0]` が最初に渡されたファイル。`import` の `resolved` は読み込むときに埋めておく。
-pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
+pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
     let mut ctx = Ctx {
+        os,
         mods: Vec::new(),
         funcs: Vec::new(),
         generic_funcs: Vec::new(),
@@ -756,6 +764,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
             let (r, default_name) = match &imp.target {
                 ImportTarget::Std(name) => match name.as_str() {
                     "stdio" => (ModRef::Stdio, name.clone()),
+                    "sys" => (ModRef::Sys, name.clone()),
                     // orz で書いた標準ライブラリ（読み込むときに埋めてある）。
                     _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
                     "math" | "socket" | "http" => {
@@ -883,7 +892,7 @@ pub fn lower(modules: &[Program]) -> Result<ir::Program, Diag> {
         check_params(&ctx, *m, f)?;
         let (params, ret) = ctx.func_types(*m, f, &Vec::new())?;
         let symbol = if f.is_extern {
-            extern_sig(f, &params, &ret)?;
+            extern_sig(f, &params, &ret, os)?;
             f.name.clone()
         } else {
             format!("orz_f{}_{}", m, f.name)
@@ -1035,7 +1044,17 @@ fn opaque_params(names: &[String]) -> Vec<Ty> {
 }
 
 /// `extern` の関数の、C の呼び出し方での引数と戻り値の種類。使えない型ならエラー。
-fn extern_sig(f: &Func, params: &[Ty], ret: &Option<Ty>) -> Result<ir::ExternSig, Diag> {
+fn extern_sig(f: &Func, params: &[Ty], ret: &Option<Ty>, os: Os) -> Result<ir::ExternSig, Diag> {
+    if let (Some(dll), Os::Linux) = (&f.dll, os) {
+        return Err(Diag::new(
+            f.name_span,
+            format!(
+                "`{}` は Windows の DLL（{}）の関数なので、Linux 向けには使えません",
+                f.name, dll
+            ),
+        )
+        .hint(OS_FILES_HINT));
+    }
     fn ctype(t: &Ty) -> Option<ir::CType> {
         Some(match t {
             Ty::Int(IntTy::U8) | Ty::Bool => ir::CType::U8,
@@ -1061,7 +1080,30 @@ fn extern_sig(f: &Func, params: &[Ty], ret: &Option<Ty>) -> Result<ir::ExternSig
         Some(t) => Some(ctype(t).ok_or_else(|| bad(f.ret.span(), t))?),
         None => None,
     };
-    Ok(ir::ExternSig { params: ps, ret: r })
+    Ok(ir::ExternSig {
+        params: ps,
+        ret: r,
+        dll: f.dll.clone(),
+    })
+}
+
+/// OS によって違うものを使うときの案内。
+const OS_FILES_HINT: &str = "OS ごとに違う書き方は、`名前_linux.orz` と `名前_windows.orz` に分けて書きます（`import \"名前.orz\";` で、作る OS に合うほうを読みます）";
+
+/// `sys.call` に渡せる型（8 バイトの整数として渡せるもの）か。
+fn word_like(t: &Ty) -> bool {
+    match t {
+        Ty::Int(_)
+        | Ty::Bool
+        | Ty::Address
+        | Ty::Str
+        | Ty::Array(_)
+        | Ty::Pointer(_)
+        | Ty::Struct(..)
+        | Ty::Null => true,
+        Ty::Maybe(inner) => !inner.needs_box() && word_like(inner),
+        _ => false,
+    }
 }
 
 fn check_params(ctx: &Ctx, m: usize, f: &Func) -> Result<(), Diag> {
@@ -1251,7 +1293,7 @@ fn lower_func(ctx: &mut Ctx, index: usize) -> Result<ir::Function, Diag> {
             ptr_temps: Vec::new(),
             ptr_vars: Vec::new(),
             slots: Vec::new(),
-            ext: Some(extern_sig(ast, &sig.params, &sig.ret)?),
+            ext: Some(extern_sig(ast, &sig.params, &sig.ret, ctx.os)?),
         });
     }
     let l = lower_body(
@@ -2139,11 +2181,19 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 if let ExprKind::Field(obj, f) = &callee.kind {
                     if let ExprKind::Var(ns) = &obj.kind {
                         if self.is_namespace(ns) {
-                            if let Ok(Target::Stdio) = self.ctx.member(self.module, ns, f, e.span) {
+                            let target = self.ctx.member(self.module, ns, f, e.span);
+                            if let Ok(Target::Stdio) = target {
                                 return match f.as_str() {
                                     "read_line" | "read_file" => Some(Ty::Maybe(Box::new(Ty::Str))),
                                     "write_file" => Some(Ty::Bool),
                                     "last_error" => Some(Ty::Str),
+                                    _ => None,
+                                };
+                            }
+                            if let Ok(Target::Sys) = target {
+                                return match f.as_str() {
+                                    "call" | "bits" => Some(Ty::Int(IntTy::I64)),
+                                    "from_bits" => Some(Ty::Dec),
                                     _ => None,
                                 };
                             }
@@ -2325,9 +2375,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         let shown = format!("{}.{}", ns, f);
                         return match self.ctx.member(self.module, ns, f, e.span)? {
                             Target::Top(top) => self.top_value(e.span, top, &shown, want),
-                            Target::Stdio => Err(Diag::new(
+                            Target::Stdio | Target::Sys => Err(Diag::new(
                                 e.span,
-                                "名前空間の関数は、`stdio.print(…)` のように呼び出しの形で使います",
+                                format!("`{}` は、`{}(…)` のように呼び出しの形で使います", shown, shown),
                             )),
                         };
                     }
@@ -3093,6 +3143,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 };
                 self.stdio_call(e, ns, f, args)
             }
+            Some((Target::Sys, _)) => {
+                let ExprKind::Field(_, f) = &callee.kind else {
+                    unreachable!("sys は ns.name の形")
+                };
+                self.sys_call(e, f, args)
+            }
             Some((Target::Top(TopName::Func(i)), _)) => self.call_func(e, i, args),
             Some((Target::Top(TopName::GenericFunc(g)), shown)) => {
                 let targs = self.infer_type_args(e, g, args, &shown, want)?;
@@ -3497,6 +3553,63 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ok(None)
             }
             _ => unreachable!("組み込みの関数は上ですべて扱う"),
+        }
+    }
+
+    /// `sys.call(…)` など、OS や CPU に直接頼むもの。
+    fn sys_call(&mut self, e: &Expr, name: &str, args: &[Expr]) -> Result<Option<(Operand, Ty)>, Diag> {
+        let i64t = Ty::Int(IntTy::I64);
+        match name {
+            "call" => {
+                if self.ctx.os != Os::Linux {
+                    return Err(Diag::new(
+                        e.span,
+                        "`sys.call` は Linux のシステムコールなので、Windows 向けには使えません",
+                    )
+                    .hint(OS_FILES_HINT));
+                }
+                if self.const_ctx() {
+                    return Err(Diag::new(
+                        e.span,
+                        "グローバル変数の初期値では、`sys.call` は使えません",
+                    ));
+                }
+                if args.is_empty() || args.len() > 7 {
+                    return Err(Diag::new(
+                        e.span,
+                        "`sys.call` には、システムコールの番号と、0〜6 個の引数を渡します",
+                    )
+                    .hint("例：sys.call(1, 1, \"hi\", 2)（標準出力に 2 バイト書く）"));
+                }
+                let mut values = Vec::new();
+                for a in args {
+                    let (v, t) = self.expr(a, Some(&i64t))?;
+                    if !word_like(&t) {
+                        return Err(Diag::new(
+                            a.span,
+                            format!("`sys.call` には `{}` 型の値は渡せません", t.name()),
+                        )
+                        .hint("渡せるのは整数、bool、address、string、array、pointer、構造体と、null です"));
+                    }
+                    values.push(v);
+                }
+                let dst = self.temp();
+                self.emit(Inst::Syscall { dst, args: values });
+                Ok(Some((Operand::Temp(dst), i64t)))
+            }
+            // decnum と 64 の間で、ビットをそのまま読み替える（値はすべて 8 バイトで持っているので、何もしない）。
+            "bits" => {
+                self.arg_count(e, "sys.bits", args, 1)?;
+                let v = self.expr_as(&args[0], &Ty::Dec)?;
+                Ok(Some((v, i64t)))
+            }
+            "from_bits" => {
+                self.arg_count(e, "sys.from_bits", args, 1)?;
+                let v = self.expr_as(&args[0], &i64t)?;
+                Ok(Some((v, Ty::Dec)))
+            }
+            _ => Err(Diag::new(e.span, format!("`sys` に `{}` はありません", name))
+                .hint("sys にあるのは call、bits、from_bits です")),
         }
     }
 

@@ -1,0 +1,5 @@
+// error: ファイル `modules/nothing_here.orz` が見つかりません
+import "modules/nothing_here.orz";
+
+function nothing main() {
+}

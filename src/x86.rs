@@ -27,10 +27,18 @@ pub enum Os {
     Windows,
 }
 
+/// 出力したアセンブリと、リンクに要るもの。
+pub struct Output {
+    pub asm: String,
+    /// 呼んでいる Windows の DLL（`extern "ws2_32.dll" function …`）。
+    pub dlls: Vec<String>,
+}
+
 /// `gc_disabled` なら GC を動かさない（終了時にまとめて解放する）。
-pub fn emit(prog: &ir::Program, srcs: &[SourceFile], os: Os, gc_disabled: bool) -> String {
+pub fn emit(prog: &ir::Program, srcs: &[SourceFile], os: Os, gc_disabled: bool) -> Output {
     let mut g = Gen {
         out: String::new(),
+        dlls: Vec::new(),
         os,
         gc_disabled,
         srcs,
@@ -52,7 +60,10 @@ pub fn emit(prog: &ir::Program, srcs: &[SourceFile], os: Os, gc_disabled: bool) 
         }
     }
     g.data();
-    g.out
+    Output {
+        asm: g.out,
+        dlls: g.dlls,
+    }
 }
 
 /// 実行時エラーへの飛び先で、何を表示するか。
@@ -73,6 +84,8 @@ type Site = (u32, usize);
 struct Gen<'a> {
     out: String,
     os: Os,
+    /// 呼んでいる DLL（出てきた順、重複なし）。
+    dlls: Vec<String>,
     gc_disabled: bool,
     srcs: &'a [SourceFile],
     prog: &'a ir::Program,
@@ -386,6 +399,15 @@ impl<'a> Gen<'a> {
                 if let Some(d) = dst {
                     self.store_temp(*d);
                 }
+            }
+            Inst::Syscall { dst, args } => {
+                // 番号は %rax、引数は %rdi, %rsi, %rdx, %r10, %r8, %r9。結果は %rax（%rcx と %r11 は壊れる）。
+                const REGS: [&str; 7] = ["%rax", "%rdi", "%rsi", "%rdx", "%r10", "%r8", "%r9"];
+                for (a, reg) in args.iter().zip(REGS) {
+                    self.load(*a, reg);
+                }
+                asm!(self, "syscall");
+                self.store_temp(*dst);
             }
             Inst::ArenaEnter => asm!(self, "call orz_rt_arena_push"),
             Inst::ArenaExit => asm!(self, "call orz_rt_arena_pop"),
@@ -827,6 +849,9 @@ impl<'a> Gen<'a> {
     /// decnum は %xmm0〜7、ほかは整数のレジスタに順に入れ、入らないものはスタックに積む。
     /// 戻り値は orz の形（32 は符号を広げ、8 と bool は 0 を詰める）にそろえて %rax に置く。
     fn call_extern(&mut self, name: &str, args: &[Operand], ext: &ir::ExternSig) {
+        if let Some(dll) = &ext.dll {
+            return self.call_dll(name, dll, args, ext);
+        }
         let (mut ints, mut sses, mut stack) = (Vec::new(), Vec::new(), Vec::new());
         for (a, t) in args.iter().zip(&ext.params) {
             if *t == ir::CType::Double && sses.len() < 8 {
@@ -859,6 +884,38 @@ impl<'a> Gen<'a> {
         if cleanup > 0 {
             asm!(self, "addq ${}, %rsp", cleanup);
         }
+        self.extern_result(ext);
+    }
+
+    /// Windows の DLL の関数を、Windows の呼び出し方で呼ぶ。
+    /// 引数は 4 個目まで %rcx, %rdx, %r8, %r9（decnum は同じ番目の %xmm0〜3）、5 個目からはスタック。
+    /// スタックには、レジスタの引数 4 個分の空き（32 バイト）も取る。
+    fn call_dll(&mut self, name: &str, dll: &str, args: &[Operand], ext: &ir::ExternSig) {
+        const REGS: [&str; 4] = ["%rcx", "%rdx", "%r8", "%r9"];
+        if !self.dlls.iter().any(|d| d.eq_ignore_ascii_case(dll)) {
+            self.dlls.push(dll.to_string());
+        }
+        let nstack = args.len().saturating_sub(REGS.len());
+        let room = (32 + nstack * 8).div_ceil(16) * 16;
+        asm!(self, "subq ${}, %rsp", room);
+        for (i, a) in args.iter().enumerate().skip(REGS.len()) {
+            self.load(*a, "%rax");
+            asm!(self, "movq %rax, {}(%rsp)", 32 + (i - REGS.len()) * 8);
+        }
+        for (i, (a, reg)) in args.iter().zip(REGS).enumerate() {
+            self.load(*a, reg);
+            if ext.params[i] == ir::CType::Double {
+                // 可変長の引数の関数のために、整数のレジスタにも同じ値を入れておく。
+                asm!(self, "movq {}, %xmm{}", reg, i);
+            }
+        }
+        asm!(self, "call *__imp_{}(%rip)", name);
+        asm!(self, "addq ${}, %rsp", room);
+        self.extern_result(ext);
+    }
+
+    /// `extern` の関数の戻り値を、orz の形（32 は符号を広げ、8 と bool は 0 を詰める）にして %rax に置く。
+    fn extern_result(&mut self, ext: &ir::ExternSig) {
         match ext.ret {
             Some(ir::CType::I32) => asm!(self, "movslq %eax, %rax"),
             Some(ir::CType::U8) => asm!(self, "movzbl %al, %eax"),
@@ -1039,6 +1096,12 @@ fn each_temp(inst: &Inst, mut f: impl FnMut(u32, bool)) {
             if let Some(d) = dst {
                 f(*d, true);
             }
+        }
+        Inst::Syscall { dst, args } => {
+            for a in args {
+                use_op(a, f);
+            }
+            f(*dst, true);
         }
         Inst::Branch { cond, .. } => use_op(cond, f),
         Inst::Ret(Some(v)) => use_op(v, f),

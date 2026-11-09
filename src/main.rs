@@ -28,14 +28,9 @@ use x86::Os;
 const RUNTIME_LINUX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime_linux.o"));
 const RUNTIME_WINDOWS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/orz_runtime_windows.o"));
 
-/// orz で書いた標準ライブラリ（`import bignum;` などで読む）。
-const STD_LIBS: &[(&str, &str)] = &[
-    ("bignum", include_str!("../lib/bignum.orz")),
-    ("strings", include_str!("../lib/strings.orz")),
-    ("lists", include_str!("../lib/lists.orz")),
-    ("maps", include_str!("../lib/maps.orz")),
-    ("os", include_str!("../lib/os.orz")),
-];
+/// orz で書いた標準ライブラリのファイル（lib/ の中身。build.rs が一覧を作る）。
+/// `import 名前;` で `名前.orz` を読む。`名前_linux.orz`・`名前_windows.orz` があれば、作る OS に合うほうを読む。
+const STD_FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/std_files.rs"));
 
 /// orz が動いている OS。
 const HOST: Os = if cfg!(windows) { Os::Windows } else { Os::Linux };
@@ -135,15 +130,16 @@ fn usage_exit() -> ! {
 }
 
 /// ソースからアセンブリを作る。エラーなら表示して終わる。
-fn compile(path: &Path, no_fold: bool, no_gc: bool, os: Os) -> String {
+fn compile(path: &Path, no_fold: bool, no_gc: bool, os: Os) -> x86::Output {
     let mut files = Files {
+        os,
         srcs: Vec::new(),
         paths: Vec::new(),
         progs: Vec::new(),
     };
     let result = files
         .load_all(path)
-        .and_then(|_| sema::lower(&files.progs))
+        .and_then(|_| sema::lower(&files.progs, os))
         .and_then(|ir| escape::check(&ir, &files.srcs).map(|_| ir))
         .and_then(|mut ir| {
             if !no_fold {
@@ -161,10 +157,36 @@ fn compile(path: &Path, no_fold: bool, no_gc: bool, os: Os) -> String {
     }
 }
 
+/// 標準ライブラリのファイルが入っている、という印のフォルダ（本当のフォルダではない）。
+const STD_DIR: &str = "std";
+
+/// OS 別のファイルの名前（`net.orz` → `net_linux.orz`）。
+fn os_variant(file: &str, os: Os) -> String {
+    let suffix = match os {
+        Os::Linux => "_linux",
+        Os::Windows => "_windows",
+    };
+    match file.rfind('.') {
+        Some(dot) if !file[dot..].contains(['/', '\\']) => {
+            format!("{}{}{}", &file[..dot], suffix, &file[dot..])
+        }
+        _ => format!("{}{}", file, suffix),
+    }
+}
+
+/// 標準ライブラリのファイル。OS 別のものがあれば、そちら。（名前, 中身）
+fn std_file(file: &str, os: Os) -> Option<(&'static str, &'static str)> {
+    let variant = os_variant(file, os);
+    let find = |name: &str| STD_FILES.iter().find(|(n, _)| *n == name).copied();
+    find(&variant).or_else(|| find(file))
+}
+
 /// 読み込んだファイル。番号は `Span::file` と同じ。0 番が最初に渡されたファイル。
 struct Files {
+    /// どの OS 向けに作るか（OS 別のファイルを選ぶ）。
+    os: Os,
     srcs: Vec<SourceFile>,
-    /// 同じファイルを 2 回読まないための、正規化したパス。
+    /// 同じファイルを 2 回読まないための、正規化したパス。標準ライブラリは `std/名前`。
     paths: Vec<PathBuf>,
     progs: Vec<ast::Program>,
 }
@@ -184,27 +206,57 @@ impl Files {
         let mut i = 0;
         while i < self.progs.len() {
             let dir = self.paths[i].parent().map(Path::to_path_buf).unwrap_or_default();
+            let in_std = dir == Path::new(STD_DIR);
             // 読む順に関係なく、import に読み込んだファイルの番号を書き込む。
+            // （何番目の import か, 正規化したパス, import の場所, 表示する名前, 標準ライブラリなら中身）
             let mut resolved = Vec::new();
             for (k, item) in self.progs[i].items.iter().enumerate() {
                 let ast::Item::Import(imp) = item else { continue };
-                match &imp.target {
-                    ast::ImportTarget::File(rel) => {
-                        let full = dir.join(rel);
-                        let canon = full.canonicalize().map_err(|_| {
-                            source::Diag::new(imp.span, format!("ファイル `{}` が見つかりません", rel))
-                                .hint("パスは、import を書いたファイルから見た場所で書きます")
-                        })?;
-                        resolved.push((k, canon, imp.span, self.display_name(i, rel), None));
-                    }
-                    ast::ImportTarget::Std(name) => {
-                        // orz で書いた標準ライブラリは、コンパイラに埋め込んである。
-                        if let Some((_, text)) = STD_LIBS.iter().find(|(n, _)| n == name) {
-                            let shown = format!("std/{}.orz", name);
-                            resolved.push((k, PathBuf::from(&shown), imp.span, shown, Some(*text)));
+                // 標準ライブラリ（`import 名前;` と、標準ライブラリの中の `import "名前.orz";`）は埋め込んである。
+                let std_name = match &imp.target {
+                    ast::ImportTarget::Std(name) => Some(format!("{}.orz", name)),
+                    ast::ImportTarget::File(rel) if in_std => Some(rel.clone()),
+                    ast::ImportTarget::File(_) => None,
+                };
+                if let Some(file) = std_name {
+                    match std_file(&file, self.os) {
+                        Some((name, text)) => {
+                            let shown = format!("{}/{}", STD_DIR, name);
+                            resolved.push((k, PathBuf::from(&shown), imp.span, shown, Some(text)));
+                        }
+                        // stdio と sys はコンパイラが知っている。ほかは、意味解析で「ありません」にする。
+                        None if matches!(imp.target, ast::ImportTarget::Std(_)) => {}
+                        None => {
+                            return Err(source::Diag::new(
+                                imp.span,
+                                format!("標準ライブラリにファイル `{}` がありません", file),
+                            ))
                         }
                     }
+                    continue;
                 }
+                let ast::ImportTarget::File(rel) = &imp.target else {
+                    unreachable!()
+                };
+                // OS 別のファイル（`名前_linux.orz` など）があれば、そちらを読む。
+                let variant = os_variant(rel, self.os);
+                let (rel, canon) = match dir.join(&variant).canonicalize() {
+                    Ok(c) => (variant, c),
+                    Err(_) => match dir.join(rel).canonicalize() {
+                        Ok(c) => (rel.clone(), c),
+                        Err(_) => {
+                            return Err(source::Diag::new(
+                                imp.span,
+                                format!("ファイル `{}` が見つかりません", rel),
+                            )
+                            .hint(format!(
+                                "パスは、import を書いたファイルから見た場所で書きます（OS 別の `{}` があれば、そちらを読みます）",
+                                variant
+                            )))
+                        }
+                    },
+                };
+                resolved.push((k, canon, imp.span, self.display_name(i, &rel), None));
             }
             for (k, canon, span, name, builtin) in resolved {
                 let index = match self.paths.iter().position(|p| *p == canon) {
@@ -284,7 +336,8 @@ fn header_items(prog: &mut ast::Program) -> Result<(), source::Diag> {
 }
 
 /// アセンブルしてリンクする。
-fn assemble_and_link(asm: &str, out: &Path, os: Os, extra: &[PathBuf]) {
+fn assemble_and_link(code: &x86::Output, out: &Path, os: Os, extra: &[PathBuf]) {
+    let asm = &code.asm;
     let (runtime, cross_cc) = match os {
         Os::Linux => (RUNTIME_LINUX, "x86_64-linux-gnu-gcc"),
         Os::Windows => (RUNTIME_WINDOWS, "x86_64-w64-mingw32-gcc"),
@@ -321,7 +374,13 @@ fn assemble_and_link(asm: &str, out: &Path, os: Os, extra: &[PathBuf]) {
     if os == Os::Windows {
         // スタックは Linux と同じ 8MB にする（Windows のふつうは 1MB）。
         link.args(["-e", "_start", "--subsystem", "console", "--stack", "8388608"]);
-        link.arg(kernel32());
+        // ランタイムが使う kernel32 と、プログラムが `extern "…"` で使う DLL。
+        link.arg(dll("kernel32.dll"));
+        for d in &code.dlls {
+            if !d.eq_ignore_ascii_case("kernel32.dll") {
+                link.arg(dll(d));
+            }
+        }
     }
     run_tool(&mut link, &ld);
     let _ = std::fs::remove_dir_all(&dir);
@@ -334,18 +393,26 @@ fn os_name(os: Os) -> &'static str {
     }
 }
 
-/// kernel32 の関数を使えるようにする。Windows の上では kernel32.dll をそのまま渡す
-/// （MinGW のライブラリの場所によらない）。ほかの OS からは MinGW の libkernel32.a を使う。
-fn kernel32() -> OsString {
+/// DLL の関数を使えるようにする。Windows の上では、DLL のファイルをそのままリンカに渡す
+/// （MinGW のライブラリの場所によらない）。今のフォルダになければ、Windows の System32 のもの。
+/// ほかの OS から作るときは、MinGW のライブラリ（`-lkernel32` → libkernel32.a）を使う。
+fn dll(name: &str) -> OsString {
     if cfg!(windows) {
+        if Path::new(name).exists() {
+            return name.into();
+        }
         if let Some(root) = std::env::var_os("SystemRoot") {
-            let dll = Path::new(&root).join("System32").join("kernel32.dll");
-            if dll.exists() {
-                return dll.into_os_string();
+            let file = Path::new(&root).join("System32").join(name);
+            if file.exists() {
+                return file.into_os_string();
             }
         }
     }
-    "-lkernel32".into()
+    let stem = name
+        .strip_suffix(".dll")
+        .or_else(|| name.strip_suffix(".DLL"))
+        .unwrap_or(name);
+    format!("-l{}", stem).into()
 }
 
 /// Windows 向けなら、拡張子のない名前に .exe を付ける。
@@ -415,15 +482,15 @@ fn main() {
         format_file(&opt.input, opt.output);
         return;
     }
-    let asm = compile(&opt.input, opt.no_fold, opt.no_gc, opt.target);
+    let code = compile(&opt.input, opt.no_fold, opt.no_gc, opt.target);
     match opt.cmd.as_str() {
         "asm" => {
             let out = opt.output.unwrap_or_else(|| opt.input.with_extension("s"));
             if out.as_os_str() == "-" {
-                print!("{}", asm);
+                print!("{}", code.asm);
                 return;
             }
-            if let Err(e) = std::fs::write(&out, asm) {
+            if let Err(e) = std::fs::write(&out, &code.asm) {
                 eprintln!("{} に書けません: {}", out.display(), e);
                 exit(1);
             }
@@ -437,7 +504,7 @@ fn main() {
                 // 拡張子がないファイルだと、元のファイルを上書きしてしまう。
                 out = opt.input.with_extension("out");
             }
-            assemble_and_link(&asm, &out, opt.target, &opt.link);
+            assemble_and_link(&code, &out, opt.target, &opt.link);
         }
         "run" => {
             if opt.target != HOST {
@@ -451,7 +518,7 @@ fn main() {
                 std::env::temp_dir().join(format!("orz-run-{}", std::process::id())),
                 opt.target,
             );
-            assemble_and_link(&asm, &out, opt.target, &opt.link);
+            assemble_and_link(&code, &out, opt.target, &opt.link);
             let status = Command::new(&out).status();
             let _ = std::fs::remove_file(&out);
             match status {

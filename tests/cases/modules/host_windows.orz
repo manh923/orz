@@ -1,0 +1,39 @@
+// Windows 向け
+extern "kernel32.dll" function 32 GetCurrentProcessId();
+extern "kernel32.dll" function 32 MulDiv(a:32, b:32, c:32);
+extern "kernel32.dll" function 32 MultiByteToWideChar(cp:32, flags:32, s:string, n:32, buf:pointer:8, cap:32);
+extern "msvcrt.dll" function decnum pow(x:decnum, y:decnum);
+extern "msvcrt.dll" function 32 sprintf(buf:pointer:8, fmt:string, a:32, b:decnum, c:32, d:decnum, e:32, f:decnum, g:64);
+extern "msvcrt.dll" function 64 strlen(s:pointer:8);
+
+export function string name() {
+    return "windows";
+}
+
+export function bool has_pid() {
+    return GetCurrentProcessId() > 0;
+}
+
+// いろいろな呼び出し方を確かめて、答えが合った数を返す。
+export function 64 check() {
+    ok:64 = 0;
+    if (MulDiv(7, 6, 2) == 21) {
+        ok = ok + 1;
+    }
+    buf:pointer:8 = allocate(256);
+    if (MultiByteToWideChar(65001, 0, "abc日本", 9, buf, 100) == 5) {
+        ok = ok + 1;
+    }
+    if (pow(2.0, 10.0) == 1024.0) {
+        ok = ok + 1;
+    }
+    n:32 = sprintf(buf, "%d %.1f %d %.1f %d %.2f %lld", 1, 2.5, -3, 4.5, 5, 6.25, 1234567890123);
+    if (n == 33 and strlen(buf) == 33) {
+        ok = ok + 1;
+    }
+    // "1 2.5 -3 4.5 5 6.25 1234567890123" の最後の文字は '3'
+    if (buf[n - 1] == 51 and buf[0] == 49 and buf[2] == 50) {
+        ok = ok + 1;
+    }
+    return ok;
+}

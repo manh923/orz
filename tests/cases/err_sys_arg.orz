@@ -1,0 +1,7 @@
+// error: `sys.call` には `decnum` 型の値は渡せません
+// os: linux
+import sys;
+
+function nothing main() {
+    n:64 = sys.call(1, 1.5);
+}

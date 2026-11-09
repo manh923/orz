@@ -1,0 +1,7 @@
+// error: `sys.call` は Linux のシステムコールなので、Windows 向けには使えません
+// os: windows
+import sys;
+
+function nothing main() {
+    n:64 = sys.call(39);
+}

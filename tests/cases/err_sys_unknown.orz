@@ -1,0 +1,6 @@
+// error: `sys` に `open` はありません
+import sys;
+
+function nothing main() {
+    n:64 = sys.open("a");
+}

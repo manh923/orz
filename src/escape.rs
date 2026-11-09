@@ -552,6 +552,8 @@ impl<'a> Analyzer<'a> {
             | Inst::ArenaEnter
             | Inst::ArenaExit
             | Inst::ArenaPop { .. } => {}
+            // システムコールに渡したアドレスの先は調べない（自己責任）。結果は数。
+            Inst::Syscall { .. } => {}
         }
     }
 
@@ -736,7 +738,9 @@ fn for_each_operand(inst: &Inst, mut f: impl FnMut(Operand)) {
             f(*array);
             f(*index);
         }
-        Inst::Call { args, .. } | Inst::CallRt { args, .. } => args.iter().for_each(|a| f(*a)),
+        Inst::Call { args, .. } | Inst::CallRt { args, .. } | Inst::Syscall { args, .. } => {
+            args.iter().for_each(|a| f(*a))
+        }
         Inst::CallIndirect { target, args, .. } => {
             f(*target);
             args.iter().for_each(|a| f(*a));

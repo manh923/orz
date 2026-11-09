@@ -12,6 +12,7 @@ use std::process::Command;
 const SRC: &str = "runtime/orz_runtime.c";
 
 fn main() {
+    std_files();
     println!("cargo:rerun-if-changed={}", SRC);
     for v in ["CC", "CC_LINUX", "CC_WINDOWS"] {
         println!("cargo:rerun-if-env-changed={}", v);
@@ -50,6 +51,31 @@ fn main() {
             std::fs::write(&out, b"").unwrap();
         }
     }
+}
+
+/// lib/ にある標準ライブラリのファイル（.orz と .orh）の一覧を作る。コンパイラに埋め込む。
+fn std_files() {
+    println!("cargo:rerun-if-changed=lib");
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("lib");
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .expect("lib/ を読めません")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".orz") || n.ends_with(".orh"))
+        .collect();
+    names.sort();
+    let mut out = String::from("&[\n");
+    for n in &names {
+        let path = root.join(n);
+        println!("cargo:rerun-if-changed={}", path.display());
+        out.push_str(&format!(
+            "    ({:?}, include_str!({:?})),\n",
+            n,
+            path.display().to_string()
+        ));
+    }
+    out.push(']');
+    let dest = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("std_files.rs");
+    std::fs::write(dest, out).unwrap();
 }
 
 fn compile(cc: &str, os: &str, out: &Path) -> std::io::Result<bool> {
