@@ -131,6 +131,8 @@ pub enum Rt {
     ArrayFill,
     /// (値, 型の説明, 改行するか) → 標準エラー出力に表示する
     EPut,
+    /// 表示しかけのものを、今すぐ書き出す
+    Flush,
 }
 
 impl Rt {
@@ -158,6 +160,7 @@ impl Rt {
             Rt::Collect => "orz_rt_collect",
             Rt::ArrayFill => "orz_rt_array_fill",
             Rt::EPut => "orz_rt_eput",
+            Rt::Flush => "orz_rt_flush",
         }
     }
 

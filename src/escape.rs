@@ -522,7 +522,8 @@ impl<'a> Analyzer<'a> {
                     | Rt::Newline
                     | Rt::WriteFile
                     | Rt::Collect
-                    | Rt::EPut => {}
+                    | Rt::EPut
+                    | Rt::Flush => {}
                 }
             }
             Inst::Ret(Some(v)) => {

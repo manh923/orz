@@ -45,6 +45,8 @@ static i64 os_close(i64 fd);
 static void *os_map(i64 n);
 static void os_unmap(void *p, i64 n);
 __attribute__((noreturn)) static void os_exit(i64 code);
+// fd が画面（端末）か。
+static int os_is_terminal(i64 fd);
 
 #ifndef _WIN32
 
@@ -125,6 +127,12 @@ static void os_unmap(void *p, i64 n) { sys3(SYS_munmap, (i64)p, n, 0); }
 
 __attribute__((noreturn)) static void os_exit(i64 code) {
     for (;;) sys3(SYS_exit_group, code, 0, 0);
+}
+
+// 端末の設定を読めれば（ioctl の TCGETS）、端末。
+static int os_is_terminal(i64 fd) {
+    char settings[64];
+    return sys3(16 /* ioctl */, fd, 0x5401, (i64)settings) == 0;
 }
 
 #else // _WIN32
@@ -342,6 +350,8 @@ static void os_unmap(void *p, i64 n) {
 
 // 終了コードは Linux と同じく 0〜255。
 __attribute__((noreturn)) static void os_exit(i64 code) { ExitProcess((u32)(code & 255)); }
+
+static int os_is_terminal(i64 fd) { return is_console(os_handle(fd)); }
 
 // gcc は、4KB より大きいスタックを使う関数の先頭でこれを呼ぶ（スタックを 1 ページずつ触って広げる）。
 // コンパイラが出すアセンブリも、大きな関数では同じように呼ぶ。%rax に大きさ。%rsp は変えない。
@@ -1508,7 +1518,17 @@ static void put_str(const char *s) {
         out(s, str_len(s));
 }
 
-void orz_rt_newline(void) { out("\n", 1); }
+// 標準出力が画面なら、1 行ごとに書き出す（待っている間も、表示が見えるように）。
+// ファイルやパイプなら、まとめて書き出す（速い）。
+static int out_is_terminal = -1;
+
+void orz_rt_newline(void) {
+    out("\n", 1);
+    if (out_fd == 1) {
+        if (out_is_terminal < 0) out_is_terminal = os_is_terminal(1);
+        if (out_is_terminal) orz_rt_flush();
+    }
+}
 
 // 構造体を表示するための説明。コンパイラが出す。
 extern const char *const orz_struct_descs[];
@@ -1826,6 +1846,9 @@ char *orz_rt_last_error(void) {
         break;
     case 111:
         m = "接続を断られました（相手が待ち受けていません）";
+        break;
+    case 9001:
+        m = "ホストは IP アドレス（127.0.0.1 など）か localhost で書きます";
         break;
     default: {
         int win = last_errno >= WIN_ERROR_BASE;

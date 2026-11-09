@@ -1,0 +1,88 @@
+// TCP の通信（Linux）。socket が使う。失敗は負の数（-エラーの番号）で返す。
+import sys;
+
+// 待ち受け・接続先のアドレス（sockaddr_in、16 バイト）。
+function array:8 endpoint(ip:array:8, port:32) {
+    a:array:8 = array(16);
+    // AF_INET（2）。ポートは上の桁が先。
+    a[0] = 2;
+    a[2] = to:8(port / 256);
+    a[3] = to:8(port % 256);
+    a[4] = ip[0];
+    a[5] = ip[1];
+    a[6] = ip[2];
+    a[7] = ip[3];
+    return a;
+}
+
+// socket(AF_INET, SOCK_STREAM, 0)
+export function 64 open_tcp() {
+    return sys.call(41, 2, 1, 0);
+}
+
+// 止めた直後でも、同じポートで待ち受けられるようにする（SO_REUSEADDR）。
+export function 64 reuse(fd:64) {
+    one:array:8 = [1, 0, 0, 0];
+    return sys.call(54, fd, 1, 2, one, 4);
+}
+
+export function 64 bind_ip(fd:64, ip:array:8, port:32) {
+    return sys.call(49, fd, endpoint(ip, port), 16);
+}
+
+export function 64 listen_on(fd:64, backlog:32) {
+    return sys.call(50, fd, backlog);
+}
+
+export function 64 accept_on(fd:64) {
+    while (true) {
+        r:64 = sys.call(43, fd, 0, 0);
+        // シグナルで中断されたら（-4）、やり直す。
+        if (r != -4) {
+            return r;
+        }
+    }
+    return -4;
+}
+
+export function 64 connect_ip(fd:64, ip:array:8, port:32) {
+    return sys.call(42, fd, endpoint(ip, port), 16);
+}
+
+// 届いた分を buf に入れて、バイト数を返す。相手が閉じていたら 0。
+export function 64 receive(fd:64, buf:array:8, max:32) {
+    while (true) {
+        r:64 = sys.call(0, fd, buf, max);
+        if (r != -4) {
+            return r;
+        }
+    }
+    return -4;
+}
+
+// p から n バイトを送って、送れたバイト数を返す。
+export function 64 transmit(fd:64, p:pointer:8, n:32) {
+    while (true) {
+        // sendto。MSG_NOSIGNAL（16384）：相手が閉じていても、シグナルで止まらずにエラーを返す。
+        r:64 = sys.call(44, fd, p, n, 16384, 0, 0);
+        if (r != -4) {
+            return r;
+        }
+    }
+    return -4;
+}
+
+export function 64 close_fd(fd:64) {
+    return sys.call(3, fd);
+}
+
+// 待ち受けているポートの番号（getsockname）。
+export function 64 local_port(fd:64) {
+    a:array:8 = array(16);
+    room:array:8 = [16, 0, 0, 0];
+    r:64 = sys.call(51, fd, a, room);
+    if (r < 0) {
+        return r;
+    }
+    return to:64(a[2]) * 256 + to:64(a[3]);
+}

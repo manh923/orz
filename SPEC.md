@@ -449,6 +449,7 @@ immutable WIDTH:32 = 80;
 - **同じファイル:** 何度`import`されても1回だけ読む
 - **名前空間:** 標準ライブラリはその名前（`import http;`なら`http`）、自分のファイルは拡張子を除いたファイル名（`import "lib/util.orz";`なら`util`）
 - **`as`:** `import "a/util.orz" as autil;`のように名前空間を付け替えられる。名前空間どうしがぶつかったらコンパイルエラーなので、そのときに使う
+- **OS別のファイル:** `import "net.orz";`と書いたとき、`net_linux.orz`や`net_windows.orz`があれば、作るOSに合うほうを読む（名前空間は`net`のまま）。OSによって書き方が違うところ（システムコールやDLL）は、同じ関数を持つファイルをOSごとに用意して分ける。標準ライブラリも同じ仕組み
 - **お互いのimport:** `a.orz`と`b.orz`がお互いを`import`してもよい
 - **同じ名前:** ファイルが違えば、`export`していない関数や変数に同じ名前を付けてよい
 - **`export`していないもの:** ほかのファイルからは使えない（コンパイルエラー）
@@ -482,7 +483,24 @@ function nothing main() {
 - **関数ポインタ:** `extern`の関数は関数ポインタにできない（呼び出し方が違うため）。orzの関数で包んで使う
 - **戻り値:** `extern`の関数が返す`string`や`array`は、ランタイムが作ったもの（長さのヘッダが付いたもの）でなければならない。arenaの検査では、そこで新しく作ったものとみなす
 - **リンク:** 中身はランタイムにあるもののほか、`orz build x.orz --link foo.o`で渡したオブジェクトやライブラリから探す
-- **Windows:** Windowsでも System V の呼び出し方なので、そのまま呼べるのはランタイムと、`-mabi=sysv`でコンパイルしたものだけ
+- **Windows:** Windowsでも System V の呼び出し方なので、`extern function`でそのまま呼べるのはランタイムと、`-mabi=sysv`でコンパイルしたものだけ。WindowsのDLLの関数は、次の`extern "…dll"`で呼ぶ
+- **DLLの関数（Windows）:** `extern "kernel32.dll" function 32 GetCurrentProcessId();`のように、`extern`の後にDLLの名前を書く。Windowsの呼び出し方で呼び、使ったDLLは自動でリンクする。Linux向けに作るときはコンパイルエラー（OS別のファイルに分けて書く）
+
+### OSへの入口（sys）
+
+`import sys;`で、OSやCPUに直接頼む関数を使えます。標準ライブラリを書くためのもので、間違えるとプログラムが壊れます（自己責任）。
+
+```
+import sys;
+
+n:64 = sys.call(1, 1, "hi\n", 3);    // Linux のシステムコール：write(1, "hi\n", 3)
+b:64 = sys.bits(1.0);                 // 4607182418800017408（decnum のビットをそのまま 64 に）
+x:decnum = sys.from_bits(b);          // 1.0
+```
+
+- **`sys.call(番号, 引数…)`:** Linuxのシステムコールを呼ぶ。引数は0〜6個で、整数、`bool`、`address`、`string`、`array`、`pointer`、構造体、`null`を渡せる。結果は`64`（失敗は負の数）。Windows向けに作るときはコンパイルエラー
+- **`sys.bits(x)`・`sys.from_bits(b)`:** `decnum`と`64`の間で、ビットをそのまま読み替える
+- **arenaの検査:** `sys.call`に渡したアドレスの先は調べない
 
 ```
 // socket.orh
@@ -498,13 +516,17 @@ extern function 32 close(fd:32);
 
 | 標準ライブラリ | 中身 | 用意する時期 |
 | --- | --- | --- |
-| `stdio` | `print`、`put`、`eprint`、`eput`、`read_line`、`read_file`、`write_file`、`last_error` | 手順5 |
+| `stdio` | `print`、`put`、`eprint`、`eput`、`flush`、`read_line`、`read_file`、`write_file`、`last_error` | 手順5 |
 | `strings` | 文字列の切り出し・検索・分割など、長い文字列を作る`Builder` | セルフホストの準備 |
 | `lists` | 長さの変わる配列`lists.List:T` | セルフホストの準備 |
 | `maps` | 文字列をキーにした表`maps.Map:V` | セルフホストの準備 |
 | `os` | コマンドの実行、環境変数、ファイルを消す、終了 | セルフホストの準備 |
-| `math` | `sqrt`、`sin`など | 手順6 |
-| `socket` | ソケット | 必要になったとき |
+| `math` | `sqrt`、`sin`、`log`など | できた |
+| `random` | 数値計算・ゲーム用の乱数（種を決められる） | できた |
+| `crypto` | 暗号用。今はOSの安全な乱数だけ | できた |
+| `socket` | TCPの通信 | できた |
+| `sys` | OSへの入口（システムコール、ビットの読み替え）。コンパイラが知っている | できた |
+| `http` | HTTP | まだ |
 | `bignum` | 大きな整数 | 手順8 |
 
 ```
@@ -631,7 +653,7 @@ stdio.print("{} * {} = {}", x, y, x * y);   // 10 * 20 = 200
 | `pointer`、`address` | 16進（`0x…`） |
 | `null` | `null` |
 
-標準出力はまとめて書き出します。プログラムの終わり、`stdio.read_line()`の前、実行時エラーの前には、必ず書き出します。
+標準出力はまとめて書き出します。プログラムの終わり、`stdio.read_line()`の前、実行時エラーの前には、必ず書き出します。標準出力が画面（端末）のときは、1行ごとに書き出します（待っている間も表示が見えるように）。`stdio.flush()`で、今すぐ書き出すこともできます。
 
 出力の最下層は`putc`だけを環境ごとに差し替えます。
 
@@ -705,6 +727,71 @@ function nothing main() {
 - **`lists`:** `l:lists.List:string = lists.new();`のように作る。`push`、`get`、`set`、`pop`、`count`、`clear`、`to_array`。添字が範囲の外なら実行時エラー
 - **`maps`:** `m:maps.Map:32 = maps.new();`のように作る。キーは`string`。`put`、`get`（なければ`null`）、`has`、`remove`、`count`、`keys`（順番は決まっていない）
 - **`os`:** `run(args)`はコマンドを実行して終わるまで待ち、終了コードを返す（実行できなければ`null`。コマンドは`PATH`から探し、標準入出力はそのまま渡す）。`env(name)`は環境変数（なければ`null`）、`remove(path)`はファイルを消す、`exit(code)`はプログラムを終える
+- **`math`:** `decnum`の数学の関数。角度はラジアン。orzで書いてある
+
+| 関数 | 内容 |
+| --- | --- |
+| `PI`、`E` | 円周率、自然対数の底 |
+| `sqrt(x)` | 平方根（誤差なし）。負の数なら実行時エラー |
+| `abs`、`min`、`max` | 絶対値、小さいほう、大きいほう |
+| `floor`、`ceil`、`trunc`、`round` | 切り下げ、切り上げ、0の方向に切り捨て、四捨五入（ちょうど半分は0から遠いほうへ） |
+| `exp`、`log`、`log2`、`log10` | eのx乗、自然対数、2と10を底とする対数。0以下の対数は実行時エラー |
+| `sin`、`cos`、`tan` | 三角関数。大きな数でも正確（`sin(1e22)`など） |
+| `asin`、`acos`、`atan`、`atan2(y, x)` | 逆三角関数。`asin`と`acos`は-1〜1の外なら実行時エラー |
+
+誤差は最後の桁で1未満（`atan2`は2未満）。計算のしかたはfdlibm（FreeBSDのmsun、musl）によるもので、OSやCPUによらず同じ結果になります。累乗は演算子の`^`を使います。
+
+- **`random`:** 数値計算・ゲーム用の速い乱数（xoshiro256**）。種を決めなければ実行するたびに違う並びになり、`random.seed(123)`で種を決めると毎回同じ並びになる。**暗号には使えない**（出た数から次の数を当てられる）ので、合言葉・トークン・鍵には`crypto`を使う
+
+| 関数 | 内容 |
+| --- | --- |
+| `seed(n:64)` | 種を決める |
+| `between(lo:32, hi:32)` | `lo`以上`hi`以下（両端を含む）。サイコロなら`between(1, 6)` |
+| `below(n:32)` | 0以上`n`未満 |
+| `fraction()` | 0以上1未満の`decnum` |
+| `coin()` | 半々で`true`か`false` |
+| `shuffle(a)`、`pick(a)` | 配列の並びをばらばらにする、配列から1つ選ぶ |
+| `next_64()` | 64ビットの乱数（負の数も出る） |
+
+- **`crypto`:** 暗号用。今あるのはOSの安全な乱数（Linuxは`getrandom`、WindowsはBCryptGenRandom）だけ。`random_bytes(n)`（`array:8`）、`random_hex(n)`（`n`バイト分の16進の文字列）、`random_below(n)`、`random_64()`
+- **`socket`:** TCPの通信。ホストはIPアドレス（`"127.0.0.1"`など）か`"localhost"`で書く（名前から調べることは、まだできない）。失敗したら`null`（か`false`）を返し、理由は`stdio.last_error()`で取れる
+
+| 関数 | 内容 |
+| --- | --- |
+| `listen(host, port)` | 待ち受ける（`maybe:socket.Listener`）。`port`が0なら空いている番号をOSが選ぶ。`"0.0.0.0"`ならほかのコンピュータからもつなげる |
+| `port(l)` | 待ち受けているポートの番号 |
+| `accept(l)` | 相手がつないでくるまで待つ（`maybe:socket.Conn`） |
+| `connect(host, port)` | つなぐ（`maybe:socket.Conn`） |
+| `read(c, max)` | 届くまで待って、届いた分（多くて`max`バイト）を`string`で返す。相手が閉じていたら`""`、失敗なら`null` |
+| `write(c, data)` | `data`を全部送る（`bool`） |
+| `close(c)`、`stop(l)` | 通信を終える、待ち受けをやめる |
+
+```
+import stdio;
+import socket;
+
+function nothing main() {
+    server:maybe:socket.Listener = socket.listen("127.0.0.1", 8080);
+    if (server == null) {
+        stdio.eprint("待ち受けられません: {}", stdio.last_error());
+        return;
+    }
+    stdio.print("http://127.0.0.1:8080/ で待っています");
+    while (true) {
+        c:maybe:socket.Conn = socket.accept(server);
+        if (c != null) {
+            // 1 回の返事で作った文字列は、arena でまとめて解放する
+            arena {
+                request:maybe:string = socket.read(c, 4096);
+                body:string = "hello\n";
+                socket.write(c, "HTTP/1.1 200 OK\r\nContent-Length: " + to:string(length(body)) + "\r\nConnection: close\r\n\r\n" + body);
+            }
+            socket.close(c);
+        }
+    }
+}
+```
+
 - **組み込み:** `allocate`、`length`、`size`、`copy`、`collect`、`bytes`、`array`は`import`なしで使える。これらの名前は、関数や変数の名前には使えない
 - **暗号:** 可変長の`bignum`は使わず、固定長で定数時間に計算する専用ライブラリを分ける
 

@@ -1,0 +1,188 @@
+// socket：TCP の通信（標準ライブラリ）
+//
+// import socket; で使う。失敗したら null（か false）を返し、理由は stdio.last_error() で取れる。
+//
+// 待ち受ける側（サーバー）：
+//
+//     server:maybe:socket.Listener = socket.listen("127.0.0.1", 8080);
+//     if (server != null) {
+//         while (true) {
+//             c:maybe:socket.Conn = socket.accept(server);
+//             if (c != null) {
+//                 request:maybe:string = socket.read(c, 4096);
+//                 socket.write(c, "HTTP/1.0 200 OK\r\n\r\nhello\n");
+//                 socket.close(c);
+//             }
+//         }
+//     }
+//
+// つなぐ側（クライアント）：
+//
+//     c:maybe:socket.Conn = socket.connect("127.0.0.1", 8080);
+//
+// ホストは IP アドレス（"127.0.0.1" など）か "localhost" で書く。"0.0.0.0" で待ち受けると、ほかのコンピュータからもつなげる。
+// 送るもの・届いたものは string（バイトの並び。文字でなくてもよい）。
+
+import "net.orz";
+
+extern function nothing orz_rt_set_error(code:64);
+extern function string orz_rt_str_from_bytes(p:pointer:8, n:64);
+
+// 待ち受けているもの。
+export struct Listener {
+    fd:64;
+}
+
+// つながっている相手。
+export struct Conn {
+    fd:64;
+}
+
+// host の number 番のポートで待ち受ける。number が 0 なら、空いている番号を OS が選ぶ（socket.port で調べる）。
+export function maybe:Listener listen(host:string, number:32) {
+    ip:maybe:array:8 = parse_ip(host, number);
+    if (ip == null) {
+        return null;
+    }
+    fd:64 = net.open_tcp();
+    if (fd < 0) {
+        return failed(fd);
+    }
+    net.reuse(fd);
+    r:64 = net.bind_ip(fd, ip, number);
+    if (r >= 0) {
+        r = net.listen_on(fd, 128);
+    }
+    if (r < 0) {
+        net.close_fd(fd);
+        return failed(r);
+    }
+    return Listener(fd);
+}
+
+// 待ち受けているポートの番号。
+export function 32 port(l:Listener) {
+    p:64 = net.local_port(l.fd);
+    if (p < 0) {
+        return 0;
+    }
+    return to:32(p);
+}
+
+// 相手がつないでくるまで待つ。
+export function maybe:Conn accept(l:Listener) {
+    fd:64 = net.accept_on(l.fd);
+    if (fd < 0) {
+        orz_rt_set_error(-fd);
+        return null;
+    }
+    return Conn(fd);
+}
+
+// host の number 番のポートにつなぐ。
+export function maybe:Conn connect(host:string, number:32) {
+    ip:maybe:array:8 = parse_ip(host, number);
+    if (ip == null) {
+        return null;
+    }
+    fd:64 = net.open_tcp();
+    if (fd < 0) {
+        orz_rt_set_error(-fd);
+        return null;
+    }
+    r:64 = net.connect_ip(fd, ip, number);
+    if (r < 0) {
+        net.close_fd(fd);
+        orz_rt_set_error(-r);
+        return null;
+    }
+    return Conn(fd);
+}
+
+// 届くまで待って、届いた分（多くて max バイト）を返す。相手が閉じていたら ""。失敗なら null。
+export function maybe:string read(c:Conn, max:32) {
+    if (max < 1) {
+        orz_rt_set_error(22);
+        return null;
+    }
+    buf:array:8 = array(max);
+    n:64 = net.receive(c.fd, buf, max);
+    if (n < 0) {
+        orz_rt_set_error(-n);
+        return null;
+    }
+    return orz_rt_str_from_bytes(bytes(to:address(buf)), n);
+}
+
+// data を全部送る。
+export function bool write(c:Conn, data:string) {
+    start:address = to:address(bytes(data));
+    sent:32 = 0;
+    while (sent < length(data)) {
+        n:64 = net.transmit(c.fd, bytes(start + to:address(to:64(sent))), length(data) - sent);
+        if (n <= 0) {
+            orz_rt_set_error(-n);
+            return false;
+        }
+        sent = sent + to:32(n);
+    }
+    return true;
+}
+
+// 通信を終える。
+export function nothing close(c:Conn) {
+    net.close_fd(c.fd);
+}
+
+// 待ち受けをやめる。
+export function nothing stop(l:Listener) {
+    net.close_fd(l.fd);
+}
+
+// ---------------- 中で使うもの ----------------
+
+function maybe:Listener failed(code:64) {
+    orz_rt_set_error(-code);
+    return null;
+}
+
+// "127.0.0.1" を 4 バイトにする。読めなければ（ポートが 0〜65535 の外でも）、理由を覚えて null。
+function maybe:array:8 parse_ip(host:string, number:32) {
+    if (number < 0 or number > 65535) {
+        orz_rt_set_error(22);
+        return null;
+    }
+    if (host == "localhost") {
+        return [127, 0, 0, 1];
+    }
+    ip:array:8 = array(4);
+    p:pointer:8 = bytes(host);
+    part:32 = 0;
+    value:32 = 0;
+    digits:32 = 0;
+    i:32 = 0;
+    while (i <= length(host)) {
+        if (i < length(host) and p[i] >= 48 and p[i] <= 57) {
+            value = value * 10 + to:32(p[i]) - 48;
+            digits = digits + 1;
+            if (value > 255 or digits > 3) {
+                break;
+            }
+        } else if ((i == length(host) or p[i] == 46) and digits > 0 and part < 4) {
+            ip[part] = to:8(value);
+            part = part + 1;
+            value = 0;
+            digits = 0;
+        } else {
+            part = 9;
+            break;
+        }
+        i = i + 1;
+    }
+    if (part != 4 or i <= length(host)) {
+        // 9001：IP アドレスでない（名前から調べることは、まだできない）。
+        orz_rt_set_error(9001);
+        return null;
+    }
+    return ip;
+}

@@ -1,0 +1,156 @@
+// TCP の通信（Windows）。socket が使う。失敗は負の数（-エラーの番号。番号は Linux にそろえる）で返す。
+extern "ws2_32.dll" function 32 WSAStartup(version:32, data:array:8);
+extern "ws2_32.dll" function 32 WSAGetLastError();
+extern "ws2_32.dll" function 64 socket(family:32, kind:32, protocol:32);
+extern "ws2_32.dll" function 32 bind(s:64, addr:array:8, n:32);
+extern "ws2_32.dll" function 32 listen(s:64, backlog:32);
+extern "ws2_32.dll" function 64 accept(s:64, addr:address, n:address);
+extern "ws2_32.dll" function 32 connect(s:64, addr:array:8, n:32);
+extern "ws2_32.dll" function 32 recv(s:64, buf:array:8, n:32, flags:32);
+extern "ws2_32.dll" function 32 send(s:64, buf:pointer:8, n:32, flags:32);
+extern "ws2_32.dll" function 32 closesocket(s:64);
+extern "ws2_32.dll" function 32 getsockname(s:64, addr:array:8, n:array:8);
+
+started:bool = false;
+
+// 最初に 1 回、Winsock を使い始める（バージョン 2.2）。
+function nothing start() {
+    if (not started) {
+        data:array:8 = array(512);
+        WSAStartup(514, data);
+        started = true;
+    }
+}
+
+// 直前の失敗を、-（Linux のエラーの番号）にする。
+function 64 failure() {
+    e:32 = WSAGetLastError();
+    if (e == 10048) {
+        return -98;
+    }
+    if (e == 10049) {
+        return -99;
+    }
+    if (e == 10061) {
+        return -111;
+    }
+    if (e == 10054 or e == 10053) {
+        return -104;
+    }
+    if (e == 10060) {
+        return -110;
+    }
+    if (e == 10051) {
+        return -101;
+    }
+    if (e == 10065) {
+        return -113;
+    }
+    if (e == 10013) {
+        return -13;
+    }
+    if (e == 10022) {
+        return -22;
+    }
+    if (e == 10024) {
+        return -24;
+    }
+    if (e == 10058) {
+        return -32;
+    }
+    // ほかは「Windows の番号」として伝える。
+    return -(100000 + to:64(e));
+}
+
+// 待ち受け・接続先のアドレス（sockaddr_in、16 バイト）。
+function array:8 endpoint(ip:array:8, port:32) {
+    a:array:8 = array(16);
+    // AF_INET（2）。ポートは上の桁が先。
+    a[0] = 2;
+    a[2] = to:8(port / 256);
+    a[3] = to:8(port % 256);
+    a[4] = ip[0];
+    a[5] = ip[1];
+    a[6] = ip[2];
+    a[7] = ip[3];
+    return a;
+}
+
+// socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+export function 64 open_tcp() {
+    start();
+    s:64 = socket(2, 1, 6);
+    if (s == -1) {
+        return failure();
+    }
+    return s;
+}
+
+// Windows では、止めた直後でも同じポートで待ち受けられるので、何もしない。
+export function 64 reuse(fd:64) {
+    return 0;
+}
+
+export function 64 bind_ip(fd:64, ip:array:8, port:32) {
+    if (bind(fd, endpoint(ip, port), 16) != 0) {
+        return failure();
+    }
+    return 0;
+}
+
+export function 64 listen_on(fd:64, backlog:32) {
+    if (listen(fd, backlog) != 0) {
+        return failure();
+    }
+    return 0;
+}
+
+export function 64 accept_on(fd:64) {
+    s:64 = accept(fd, 0, 0);
+    if (s == -1) {
+        return failure();
+    }
+    return s;
+}
+
+export function 64 connect_ip(fd:64, ip:array:8, port:32) {
+    if (connect(fd, endpoint(ip, port), 16) != 0) {
+        return failure();
+    }
+    return 0;
+}
+
+// 届いた分を buf に入れて、バイト数を返す。相手が閉じていたら 0。
+export function 64 receive(fd:64, buf:array:8, max:32) {
+    r:32 = recv(fd, buf, max, 0);
+    if (r < 0) {
+        return failure();
+    }
+    return to:64(r);
+}
+
+// p から n バイトを送って、送れたバイト数を返す。
+export function 64 transmit(fd:64, p:pointer:8, n:32) {
+    r:32 = send(fd, p, n, 0);
+    if (r < 0) {
+        return failure();
+    }
+    return to:64(r);
+}
+
+export function 64 close_fd(fd:64) {
+    if (closesocket(fd) != 0) {
+        return failure();
+    }
+    return 0;
+}
+
+// 待ち受けているポートの番号。
+export function 64 local_port(fd:64) {
+    a:array:8 = array(16);
+    room:array:8 = [16, 0, 0, 0];
+    if (getsockname(fd, a, room) != 0) {
+        return failure();
+    }
+    return to:64(a[2]) * 256 + to:64(a[3]);
+}

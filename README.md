@@ -52,6 +52,9 @@ function nothing main() {
 - `import stdio;` の `print`・`put`・`read_line`・`read_file`・`write_file`・`last_error`
 - `import bignum;`：大きな整数（`bignum.from`・`parse`・`add`・`sub`・`mul`・`div`・`mod`・`pow`・`compare`・`print` など）。orz で書いてある（[lib/bignum.orz](lib/bignum.orz)）
 - `import strings;`・`lists;`・`maps;`・`os;`：文字列（切り出し・検索・分割・`Builder`）、長さの変わる配列、文字列をキーにした表、コマンドの実行・環境変数など。どれも orz で書いてある（[lib/](lib/)）
+- `import math;`：`sqrt`・`sin`・`log` など（誤差は最後の桁で 1 未満）。`import random;`：数値計算・ゲーム用の乱数。`import crypto;`：暗号用の、OS の安全な乱数
+- `import socket;`：TCP の通信（HTTP サーバーが書ける）。Linux はシステムコール、Windows は ws2_32.dll を、orz から直接呼んでいる
+- `import sys;`：OS への入口。`sys.call(番号, …)` で Linux のシステムコール、`extern "kernel32.dll" function …;` で Windows の DLL の関数を呼べる。OS によって違うところは `名前_linux.orz`・`名前_windows.orz` に分けて書く
 - `extern function 型 名前(…);` と `.orh`：ランタイムや C の関数を呼ぶ（`--link` でオブジェクトを足せる）
 - `array(n, 初期値)`、`stdio.eprint`・`eput`（標準エラー出力）
 - 自分のファイルの `import "util.orz";` と `export`
@@ -64,7 +67,7 @@ function nothing main() {
 
 - 整形ツール（`orz fmt`）：`;`・`{`・`}` で改行と字下げを決め、コメントと空行（1 行まで）を残す
 
-`math`・`socket` などの標準ライブラリはまだありません。
+`http` などの標準ライブラリはまだありません。
 
 ```
 import bignum;
@@ -108,7 +111,7 @@ C コンパイラが `cc` という名前で見つからなければ、`CC=gcc c
 
 ### VS Code
 
-色分けの拡張機能が [editors/vscode](editors/vscode) にあります。`Ctrl+Shift+P` →「Extensions: Install from VSIX...」で、`editors/vscode/orz-0.1.1.vsix` を選ぶと入ります。
+色分けの拡張機能が [editors/vscode](editors/vscode) にあります。`Ctrl+Shift+P` →「Extensions: Install from VSIX...」で、`editors/vscode/orz-0.1.2.vsix` を選ぶと入ります。
 
 ## テスト
 
@@ -144,4 +147,4 @@ cargo test
 | `runtime/orz_runtime.c` | ランタイム（表示、文字列、メモリ、ファイルなど）。C ライブラリは使わない。OS とのやりとり（Linux はシステムコール、Windows は kernel32）は「OS」の節にまとめてある |
 | `build.rs` | ランタイムを OS ごとにコンパイルして、コンパイラに埋め込む |
 | `editors/vscode/` | VS Code の拡張機能（色分け） |
-| `lib/*.orz` | orz で書いた標準ライブラリ（bignum、strings、lists、maps、os）。コンパイラに埋め込む |
+| `lib/*.orz` | orz で書いた標準ライブラリ。ファイルを置くと、`import 名前;` で使えるようになる（コンパイラに埋め込む）。`名前_linux.orz`・`名前_windows.orz` は OS 別 |

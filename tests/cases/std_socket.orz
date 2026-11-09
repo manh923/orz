@@ -1,0 +1,71 @@
+// exit: 0
+// 標準ライブラリ socket（同じプログラムの中で、つなぐ側と受ける側の両方をやる）
+import stdio;
+import strings;
+import socket;
+
+// 相手が閉じるまで読む。
+function string read_all(c:socket.Conn) {
+    b:strings.Builder = strings.builder();
+    while (true) {
+        part:maybe:string = socket.read(c, 4096);
+        if (part == null or length(part) == 0) {
+            break;
+        }
+        strings.add(b, part);
+    }
+    return strings.text(b);
+}
+
+function nothing main() {
+    // ポート 0 で待ち受けると、空いている番号が選ばれる
+    server:maybe:socket.Listener = socket.listen("127.0.0.1", 0);
+    if (server == null) {
+        stdio.print("listen: " + stdio.last_error());
+        return;
+    }
+    port:32 = socket.port(server);
+    stdio.print(port > 0);
+    stdio.flush();
+    // 同じプログラムの中で、つなぐ側と受ける側の両方をやる
+    client:maybe:socket.Conn = socket.connect("localhost", port);
+    conn:maybe:socket.Conn = socket.accept(server);
+    if (client == null or conn == null) {
+        stdio.print("connect/accept: " + stdio.last_error());
+        return;
+    }
+    stdio.print(socket.write(client, "GET / HTTP/1.0\r\n\r\n"));
+    request:maybe:string = socket.read(conn, 1024);
+    if (request != null) {
+        stdio.print(strings.trim(request));
+    }
+    // 大きめの返事（何回かに分かれて届く）
+    body:string = strings.repeat("0123456789", 5000);
+    stdio.print(socket.write(conn, "HTTP/1.0 200 OK\r\n\r\n" + body));
+    socket.close(conn);
+    response:string = read_all(client);
+    stdio.print(length(response));
+    stdio.print(strings.starts_with(response, "HTTP/1.0 200 OK\r\n\r\n0123456789"));
+    stdio.print(strings.ends_with(response, "0123456789"));
+    // 相手が閉じたあとは "" が返る
+    stdio.print(socket.read(client, 10));
+    socket.close(client);
+
+    // 同じポートでもう 1 つ待ち受けようとすると、失敗する
+    second:maybe:socket.Listener = socket.listen("127.0.0.1", port);
+    stdio.print(second == null);
+    stdio.print(stdio.last_error());
+    socket.stop(server);
+
+    // 待ち受けていないポートにはつなげない
+    nobody:maybe:socket.Conn = socket.connect("127.0.0.1", port);
+    stdio.print(nobody == null);
+    stdio.print(stdio.last_error());
+
+    // IP アドレスでないホスト
+    stdio.print(socket.connect("example.com", 80) == null);
+    stdio.print(stdio.last_error());
+    stdio.print(socket.listen("1.2.3", 80) == null);
+    stdio.print(socket.listen("127.0.0.1", 70000) == null);
+    stdio.print(stdio.last_error());
+}

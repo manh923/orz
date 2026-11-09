@@ -768,17 +768,23 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     // orz で書いた標準ライブラリ（読み込むときに埋めてある）。
                     _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
                     "http" => {
-                        return Err(Diag::new(imp.span, format!("標準ライブラリ `{}` はまだありません", name))
-                            .hint("標準ライブラリの一覧は、SPEC.md の「標準ライブラリ」にあります"))
+                        return Err(Diag::new(
+                            imp.span,
+                            format!("標準ライブラリ `{}` はまだありません", name),
+                        )
+                        .hint("標準ライブラリの一覧は、SPEC.md の「標準ライブラリ」にあります"))
                     }
                     _ => {
-                        return Err(Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
-                            .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます"))
+                        return Err(
+                            Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))
+                                .hint("自分のファイルなら `import \"ファイル名.orz\";` と書きます"),
+                        )
                     }
                 },
-                ImportTarget::File(path) => {
-                    (ModRef::File(imp.resolved.expect("読み込むときに埋めてある")), file_stem(path))
-                }
+                ImportTarget::File(path) => (
+                    ModRef::File(imp.resolved.expect("読み込むときに埋めてある")),
+                    file_stem(path),
+                ),
             };
             let ns = imp.alias.clone().unwrap_or(default_name);
             if !is_ident(&ns) {
@@ -3685,8 +3691,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 let v = self.rt_value(Rt::LastError, vec![], e.span)?;
                 Ok(Some((v, Ty::Str)))
             }
-            _ => Err(Diag::new(e.span, format!("`{}` に `{}` はありません", ns, name))
-                .hint("stdio にあるのは print、put、eprint、eput、read_line、read_file、write_file、last_error です")),
+            "flush" => {
+                self.arg_count(e, &full, args, 0)?;
+                self.rt(Rt::Flush, vec![], e.span, false)?;
+                Ok(None)
+            }
+            _ => Err(Diag::new(e.span, format!("`{}` に `{}` はありません", ns, name)).hint(
+                "stdio にあるのは print、put、eprint、eput、flush、read_line、read_file、write_file、last_error です",
+            )),
         }
     }
 

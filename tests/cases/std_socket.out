@@ -1,0 +1,17 @@
+true
+true
+GET / HTTP/1.0
+true
+50019
+true
+true
+
+true
+そのアドレス（ポート）は、すでに使われています
+true
+接続を断られました（相手が待ち受けていません）
+true
+ホストは IP アドレス（127.0.0.1 など）か localhost で書きます
+true
+true
+値が正しくありません
