@@ -1,0 +1,7 @@
+// runtime: math.sqrt に負の数 -4.0 が渡されました
+import math;
+
+function nothing main() {
+    x:decnum = -4.0;
+    y:decnum = math.sqrt(x);
+}

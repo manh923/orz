@@ -1,0 +1,42 @@
+// exit: 0
+// 標準ライブラリ math
+import stdio;
+import math;
+
+function nothing main() {
+    stdio.print(math.sqrt(2.0));
+    stdio.print(math.sin(math.PI / 2.0));
+    stdio.print(math.cos(1.0));
+    stdio.print(math.tan(1.0));
+    stdio.print(math.exp(1.0));
+    stdio.print(math.log(10.0));
+    stdio.print(math.log2(8.0));
+    stdio.print(math.log10(1000.0));
+    stdio.print(math.atan(1.0));
+    stdio.print(math.atan2(1.0, -1.0));
+    stdio.print(math.asin(0.5));
+    stdio.print(math.acos(0.5));
+    stdio.print(math.floor(-1.5));
+    stdio.print(math.ceil(-1.5));
+    stdio.print(math.round(2.5));
+    stdio.print(math.round(-2.5));
+    stdio.print(math.trunc(-1.7));
+    stdio.print(math.sin(1e22));
+    stdio.print(math.cos(1e300));
+    stdio.print(math.abs(-3.5));
+    // 誤差なしで決まるもの
+    stdio.print(math.sqrt(1e100));
+    stdio.print(math.log2(0.125));
+    stdio.print(math.round(0.49999999999999994));
+    stdio.print(math.floor(1e300) == 1e300);
+    stdio.print(math.min(1.5, -2.0));
+    stdio.print(math.max(1.5, -2.0));
+    stdio.print(math.sin(0.0));
+    stdio.print(math.cos(0.0));
+    stdio.print(math.atan2(0.0, -1.0) == math.PI);
+    stdio.print(math.exp(0.0));
+    stdio.print(math.log(1.0));
+    // 角度を度で
+    deg:decnum = 30.0;
+    stdio.print(math.round(math.sin(deg * math.PI / 180.0) * 1000.0) / 1000.0);
+}

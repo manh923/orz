@@ -1,0 +1,764 @@
+// math：数学の関数（標準ライブラリ）
+//
+// import math; で使う。角度はラジアン。
+//
+//     math.sqrt(2.0)             // 1.4142135623730951
+//     math.sin(math.PI / 2.0)    // 1.0
+//     math.floor(-1.5)           // -2.0
+//     math.log10(1000.0)         // 3.0
+//
+// 答えのない計算（負の数の平方根、0 以下の対数など）は、実行時エラーで止まる。
+// 誤差は、最後の桁で 1 未満（sqrt・floor・ceil・trunc・round は誤差なし）。
+//
+// sin・cos・tan・asin・acos・atan・exp・log の計算のしかたと係数は fdlibm（FreeBSD の msun、musl）によるもの。
+// fdlibm の断り書き：
+//
+// ====================================================
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//
+// Developed at SunPro, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+// ====================================================
+
+import sys;
+
+extern function nothing orz_rt_fail(msg:string);
+
+export immutable PI:decnum = 3.141592653589793;
+export immutable E:decnum = 2.718281828459045;
+
+// ---------------- 基本 ----------------
+
+export function decnum abs(x:decnum) {
+    return sys.from_bits(sys.bits(x) and 9223372036854775807);
+}
+
+export function decnum min(a:decnum, b:decnum) {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+export function decnum max(a:decnum, b:decnum) {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+// 0 の方向に切り捨てる。
+export function decnum trunc(x:decnum) {
+    // 2^52 以上は、もう整数。
+    if (x >= 4503599627370496.0 or x <= -4503599627370496.0) {
+        return x;
+    }
+    return to:decnum(to:64(x));
+}
+
+// x 以下でいちばん大きい整数。
+export function decnum floor(x:decnum) {
+    t:decnum = trunc(x);
+    if (t > x) {
+        return t - 1.0;
+    }
+    return t;
+}
+
+// x 以上でいちばん小さい整数。
+export function decnum ceil(x:decnum) {
+    t:decnum = trunc(x);
+    if (t < x) {
+        return t + 1.0;
+    }
+    return t;
+}
+
+// 四捨五入（ちょうど半分は、0 から遠いほうへ）。
+export function decnum round(x:decnum) {
+    t:decnum = trunc(x);
+    d:decnum = x - t;
+    if (d >= 0.5) {
+        return t + 1.0;
+    }
+    if (d <= -0.5) {
+        return t - 1.0;
+    }
+    return t;
+}
+
+// 平方根。
+export function decnum sqrt(x:decnum) {
+    if (x < 0.0) {
+        orz_rt_fail("math.sqrt に負の数 " + to:string(x) + " が渡されました");
+    }
+    if (x == 0.0) {
+        return x;
+    }
+    return x ^ 0.5;
+}
+
+// ---------------- 指数と対数 ----------------
+
+immutable LN2_HI:decnum = 0.6931471803691238;
+immutable LN2_LO:decnum = 1.9082149292705877e-10;
+immutable INVLN2:decnum = 1.4426950408889634;
+immutable P1:decnum = 0.16666666666666602;
+immutable P2:decnum = -0.0027777777777015593;
+immutable P3:decnum = 6.613756321437934e-05;
+immutable P4:decnum = -1.6533902205465252e-06;
+immutable P5:decnum = 4.1381367970572385e-08;
+
+// e の x 乗。
+export function decnum exp(x:decnum) {
+    if (x > 709.782712893384) {
+        orz_rt_fail("math.exp の結果が decnum の範囲を超えました（" + to:string(x) + " は大きすぎます）");
+    }
+    if (x < -745.1332191019411) {
+        return 0.0;
+    }
+    // x = k × ln2 + r（|r| <= 0.5 ln2）に分けて、e^x = 2^k × e^r。r は hi - lo で持つ。
+    hi:decnum = x;
+    lo:decnum = 0.0;
+    k:64 = 0;
+    ax:decnum = abs(x);
+    if (ax > 0.34657359123229975) {
+        if (ax < 1.0397205352783203) {
+            k = 1;
+            if (x < 0.0) {
+                k = -1;
+            }
+        } else if (x < 0.0) {
+            k = to:64(INVLN2 * x - 0.5);
+        } else {
+            k = to:64(INVLN2 * x + 0.5);
+        }
+        dk:decnum = to:decnum(k);
+        hi = x - dk * LN2_HI;
+        lo = dk * LN2_LO;
+    } else if (ax < 3.725290298461914e-09) {
+        return 1.0 + x;
+    }
+    r:decnum = hi - lo;
+    t:decnum = r * r;
+    c:decnum = r - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
+    if (k == 0) {
+        return 1.0 - ((r * c) / (c - 2.0) - r);
+    }
+    y:decnum = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+    // 2^k を掛ける。
+    if (k > 1023) {
+        return y * pow2(1023) * pow2(k - 1023);
+    }
+    if (k >= -1022) {
+        return y * pow2(k);
+    }
+    return y * pow2(k + 1000) * pow2(-1000);
+}
+
+immutable LG1:decnum = 0.6666666666666735;
+immutable LG2:decnum = 0.3999999999940942;
+immutable LG3:decnum = 0.2857142874366239;
+immutable LG4:decnum = 0.22222198432149784;
+immutable LG5:decnum = 0.1818357216161805;
+immutable LG6:decnum = 0.15313837699209373;
+immutable LG7:decnum = 0.14798198605116586;
+immutable IVLN2_HI:decnum = 1.4426950407214463;
+immutable IVLN2_LO:decnum = 1.6751713164886512e-10;
+immutable IVLN10_HI:decnum = 0.4342944818781689;
+immutable IVLN10_LO:decnum = 2.5082946711645275e-11;
+immutable LOG10_2_HI:decnum = 0.30102999566361177;
+immutable LOG10_2_LO:decnum = 3.694239077158931e-13;
+
+// log_split の結果：x = 2^log_k × (1 + log_f)、√2/2 <= 1 + log_f < √2。
+log_k:64 = 0;
+log_f:decnum = 0.0;
+
+function nothing log_split(what:string, x:decnum) {
+    if (x <= 0.0) {
+        orz_rt_fail(what + " に 0 以下の数 " + to:string(x) + " が渡されました");
+    }
+    v:decnum = x;
+    k:64 = 0;
+    if (v < 2.2250738585072014e-308) {
+        // とても小さい数は、2^54 倍してから調べる。
+        v = v * 18014398509481984.0;
+        k = -54;
+    }
+    bits:64 = sys.bits(v);
+    hx:64 = (bits >> 32) + 614242;
+    k = k + (hx >> 20) - 1023;
+    hx = (hx and 1048575) + 1072079006;
+    log_k = k;
+    log_f = sys.from_bits((hx << 32) or (bits and 4294967295)) - 1.0;
+}
+
+// log(1 + f) = f - f²/2 + log_tail(f)
+function decnum log_tail(f:decnum) {
+    hfsq:decnum = 0.5 * f * f;
+    s:decnum = f / (2.0 + f);
+    z:decnum = s * s;
+    w:decnum = z * z;
+    t1:decnum = w * (LG2 + w * (LG4 + w * LG6));
+    t2:decnum = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    return s * (hfsq + (t2 + t1));
+}
+
+// 自然対数（e を底とする対数）。
+export function decnum log(x:decnum) {
+    log_split("math.log", x);
+    f:decnum = log_f;
+    dk:decnum = to:decnum(log_k);
+    hfsq:decnum = 0.5 * f * f;
+    return log_tail(f) + dk * LN2_LO - hfsq + f + dk * LN2_HI;
+}
+
+// 2 を底とする対数。2 の累乗なら、ちょうどの値になる。
+export function decnum log2(x:decnum) {
+    log_split("math.log2", x);
+    f:decnum = log_f;
+    hfsq:decnum = 0.5 * f * f;
+    // hi + lo = log(1 + f)。hi は下の 32 ビットを 0 にして、掛け算に誤差が出ないようにする。
+    hi:decnum = clear_low(f - hfsq);
+    lo:decnum = (f - hi) - hfsq + log_tail(f);
+    val_hi:decnum = hi * IVLN2_HI;
+    val_lo:decnum = (lo + hi) * IVLN2_LO + lo * IVLN2_HI;
+    y:decnum = to:decnum(log_k);
+    w:decnum = y + val_hi;
+    val_lo = val_lo + ((y - w) + val_hi);
+    return val_lo + w;
+}
+
+// 10 を底とする対数。
+export function decnum log10(x:decnum) {
+    log_split("math.log10", x);
+    f:decnum = log_f;
+    hfsq:decnum = 0.5 * f * f;
+    hi:decnum = clear_low(f - hfsq);
+    lo:decnum = (f - hi) - hfsq + log_tail(f);
+    val_hi:decnum = hi * IVLN10_HI;
+    dk:decnum = to:decnum(log_k);
+    y:decnum = dk * LOG10_2_HI;
+    val_lo:decnum = dk * LOG10_2_LO + (lo + hi) * IVLN10_LO + lo * IVLN10_HI;
+    w:decnum = y + val_hi;
+    val_lo = val_lo + ((y - w) + val_hi);
+    return val_lo + w;
+}
+
+// ---------------- 三角関数 ----------------
+
+immutable PIO4:decnum = 0.7853981633974483;
+immutable PIO4_LO:decnum = 3.061616997868383e-17;
+immutable PIO2_HI:decnum = 1.5707963267948966;
+immutable PIO2_LO:decnum = 6.123233995736766e-17;
+immutable PI_LO:decnum = 1.2246467991473532e-16;
+
+immutable S1:decnum = -0.16666666666666632;
+immutable S2:decnum = 0.00833333333332249;
+immutable S3:decnum = -0.0001984126982985795;
+immutable S4:decnum = 2.7557313707070068e-06;
+immutable S5:decnum = -2.5050760253406863e-08;
+immutable S6:decnum = 1.58969099521155e-10;
+
+immutable C1:decnum = 0.0416666666666666;
+immutable C2:decnum = -0.001388888888887411;
+immutable C3:decnum = 2.480158728947673e-05;
+immutable C4:decnum = -2.7557314351390663e-07;
+immutable C5:decnum = 2.087572321298175e-09;
+immutable C6:decnum = -1.1359647557788195e-11;
+
+immutable T0:decnum = 3.33333333333334091986e-01;
+immutable T1:decnum = 1.33333333333201242699e-01;
+immutable T2:decnum = 5.39682539762260521377e-02;
+immutable T3:decnum = 2.18694882948595424599e-02;
+immutable T4:decnum = 8.86323982359930005737e-03;
+immutable T5:decnum = 3.59207910759131235356e-03;
+immutable T6:decnum = 1.45620945432529025516e-03;
+immutable T7:decnum = 5.88041240820264096874e-04;
+immutable T8:decnum = 2.46463134818469906812e-04;
+immutable T9:decnum = 7.81794442939557092300e-05;
+immutable T10:decnum = 7.14072491382608190305e-05;
+immutable T11:decnum = -1.85586374855275456654e-05;
+immutable T12:decnum = 2.59073051863633712884e-05;
+
+// sin(x + y)。|x| <= π/4 で、y は x の続き（小さい）。has_y が false なら y は 0。
+function decnum ksin(x:decnum, y:decnum, has_y:bool) {
+    z:decnum = x * x;
+    w:decnum = z * z;
+    r:decnum = S2 + z * (S3 + z * S4) + z * w * (S5 + z * S6);
+    v:decnum = z * x;
+    if (not has_y) {
+        return x + v * (S1 + z * r);
+    }
+    return x - ((z * (0.5 * y - v * r) - y) - v * S1);
+}
+
+// cos(x + y)。|x| <= π/4。
+function decnum kcos(x:decnum, y:decnum) {
+    z:decnum = x * x;
+    w:decnum = z * z;
+    r:decnum = z * (C1 + z * (C2 + z * C3)) + w * w * (C4 + z * (C5 + z * C6));
+    hz:decnum = 0.5 * z;
+    w = 1.0 - hz;
+    return w + (((1.0 - w) - hz) + (z * r - x * y));
+}
+
+// tan(x + y)。|x| <= π/4。odd なら -1/tan(x + y)。
+function decnum ktan(x0:decnum, y0:decnum, odd:bool) {
+    x:decnum = x0;
+    y:decnum = y0;
+    big:bool = abs(x) >= 0.6743354797363281;
+    negative:bool = x < 0.0;
+    if (big) {
+        if (negative) {
+            x = -x;
+            y = -y;
+        }
+        x = (PIO4 - x) + (PIO4_LO - y);
+        y = 0.0;
+    }
+    z:decnum = x * x;
+    w:decnum = z * z;
+    r:decnum = T1 + w * (T3 + w * (T5 + w * (T7 + w * (T9 + w * T11))));
+    v:decnum = z * (T2 + w * (T4 + w * (T6 + w * (T8 + w * (T10 + w * T12)))));
+    s:decnum = z * x;
+    r = y + z * (s * (r + v) + y) + s * T0;
+    w = x + r;
+    if (big) {
+        s = 1.0;
+        if (odd) {
+            s = -1.0;
+        }
+        v = s - 2.0 * (x + (r - w * w / (w + s)));
+        if (negative) {
+            return -v;
+        }
+        return v;
+    }
+    if (not odd) {
+        return w;
+    }
+    // -1/(x + r) を、誤差が大きくならないように計算する。
+    w0:decnum = clear_low(w);
+    v = r - (w0 - x);
+    a:decnum = -1.0 / w;
+    a0:decnum = clear_low(a);
+    return a0 + a * (1.0 + a0 * w0 + a0 * v);
+}
+
+export function decnum sin(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax <= PIO4) {
+        if (ax < 7.450580596923828e-09) {
+            return x;
+        }
+        return ksin(x, 0.0, false);
+    }
+    n:32 = rem_pio2(x) and 3;
+    if (n == 0) {
+        return ksin(rem_hi, rem_lo, true);
+    }
+    if (n == 1) {
+        return kcos(rem_hi, rem_lo);
+    }
+    if (n == 2) {
+        return -ksin(rem_hi, rem_lo, true);
+    }
+    return -kcos(rem_hi, rem_lo);
+}
+
+export function decnum cos(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax <= PIO4) {
+        if (ax < 1.0536709282860102e-08) {
+            return 1.0;
+        }
+        return kcos(x, 0.0);
+    }
+    n:32 = rem_pio2(x) and 3;
+    if (n == 0) {
+        return kcos(rem_hi, rem_lo);
+    }
+    if (n == 1) {
+        return -ksin(rem_hi, rem_lo, true);
+    }
+    if (n == 2) {
+        return -kcos(rem_hi, rem_lo);
+    }
+    return ksin(rem_hi, rem_lo, true);
+}
+
+export function decnum tan(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax <= PIO4) {
+        if (ax < 7.450580596923828e-09) {
+            return x;
+        }
+        return ktan(x, 0.0, false);
+    }
+    n:32 = rem_pio2(x);
+    return ktan(rem_hi, rem_lo, (n and 1) == 1);
+}
+
+// ---------------- π/2 で割った余り ----------------
+
+immutable INVPIO2:decnum = 0.6366197723675814;
+immutable TOINT:decnum = 6755399441055744.0;
+immutable PIO2_1:decnum = 1.5707963267341256;
+immutable PIO2_1T:decnum = 6.077100506506192e-11;
+immutable PIO2_2:decnum = 6.077100506303966e-11;
+immutable PIO2_2T:decnum = 2.0222662487959506e-21;
+immutable PIO2_3:decnum = 2.0222662487111665e-21;
+immutable PIO2_3T:decnum = 8.4784276603689e-32;
+
+// rem_pio2 の結果：x = n × π/2 + (rem_hi + rem_lo)、|rem_hi + rem_lo| <= π/4。
+rem_hi:decnum = 0.0;
+rem_lo:decnum = 0.0;
+
+// x を π/2 で割った余りを rem_hi・rem_lo に入れて、商 n（の下の桁）を返す。
+function 32 rem_pio2(x:decnum) {
+    if (abs(x) >= 1647099.0) {
+        return rem_large(x);
+    }
+    // π/2 を 3 つに分けた数を、順に引いていく（桁落ちが大きいときだけ、先まで使う）。
+    q:decnum = x * INVPIO2 + TOINT - TOINT;
+    n:32 = to:32(q);
+    r:decnum = x - q * PIO2_1;
+    w:decnum = q * PIO2_1T;
+    y:decnum = r - w;
+    ex:64 = (sys.bits(x) >> 52) and 2047;
+    ey:64 = (sys.bits(y) >> 52) and 2047;
+    if (ex - ey > 16) {
+        t:decnum = r;
+        w = q * PIO2_2;
+        r = t - w;
+        w = q * PIO2_2T - ((t - r) - w);
+        y = r - w;
+        ey = (sys.bits(y) >> 52) and 2047;
+        if (ex - ey > 49) {
+            t = r;
+            w = q * PIO2_3;
+            r = t - w;
+            w = q * PIO2_3T - ((t - r) - w);
+            y = r - w;
+        }
+    }
+    rem_hi = y;
+    rem_lo = (r - y) - w;
+    return n;
+}
+
+// 2/π の小数点以下を、24 ビットずつ並べたもの。
+immutable PI2:array:64 = [10680707, 7228996, 1387004, 2578385, 16069853, 12639074, 9804092, 4427841, // 0〜
+    16666979, 11263675, 12935607, 2387514, 4345298, 14681673, 3074569, 13734428, // 8〜
+    16653803, 1880361, 10960616, 8533493, 3062596, 8710556, 7349940, 6258241, // 16〜
+    3772886, 3769171, 3798172, 8675211, 12450088, 3874808, 9961438, 366607, // 24〜
+    15675153, 9132554, 7151469, 3571407, 2607881, 12013382, 4155038, 6285869, // 32〜
+    7677882, 13102053, 15825725, 473591, 9065106, 15363067, 6271263, 9264392, // 40〜
+    5636912, 4652155, 7056368, 13614112, 10155062, 1944035, 9527646, 15080200];
+
+// 大きな x 用。|x| = m × 2^e（m は 53 ビットの整数）と見て、m × (2/π の必要な桁) を整数で正確に計算する。
+function 32 rem_large(x:decnum) {
+    bits:64 = sys.bits(x) and 9223372036854775807;
+    e:64 = (bits >> 52) - 1075;
+    m:64 = (bits and 4503599627370495) or 4503599627370496;
+    // 2/π の k0 番目より前の桁は、掛けると 4 の倍数になる（n を 4 で割った余りに関係しない）ので使わない。
+    k0:64 = 0;
+    if (e >= 2) {
+        k0 = (e - 2) / 24;
+    }
+    a:array:64 = [m and 16777215, (m >> 24) and 16777215, m >> 48];
+    // t = m × (2/π の k0 番目から 9 個)。24 ビットずつ、下の桁から。1 つ余分に取っておく（あとでずらすため）。
+    t:array:64 = array(13);
+    i:32 = 0;
+    while (i < 3) {
+        j:32 = 0;
+        while (j < 9) {
+            t[i + j] = t[i + j] + a[i] * PI2[to:32(k0) + 8 - j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    carry:64 = 0;
+    i = 0;
+    while (i < 13) {
+        v:64 = t[i] + carry;
+        t[i] = v and 16777215;
+        carry = v >> 24;
+        i = i + 1;
+    }
+    // t の下 frac ビットが小数。小数点が 24 ビットの区切りに来るように、左にずらす。
+    frac:64 = 24 * (k0 + 9) - e;
+    shift:64 = (24 - frac % 24) % 24;
+    if (shift > 0) {
+        carry = 0;
+        i = 0;
+        while (i < 13) {
+            v2:64 = (t[i] << shift) or carry;
+            t[i] = v2 and 16777215;
+            carry = v2 >> 24;
+            i = i + 1;
+        }
+    }
+    len:32 = to:32((frac + shift) / 24);
+    n:32 = to:32(t[len] and 3);
+    // 小数が 0.5 以上なら、1 から引いて（n を 1 つ進めて）、余りを負にする。
+    negative:bool = t[len - 1] >= 8388608;
+    if (negative) {
+        n = (n + 1) and 3;
+        carry = 1;
+        i = 0;
+        while (i < len) {
+            v3:64 = 16777215 - t[i] + carry;
+            t[i] = v3 and 16777215;
+            carry = v3 >> 24;
+            i = i + 1;
+        }
+    }
+    // 小数の上から 144 ビットを、3 つの decnum（どれも誤差なし）にする。
+    top:32 = len - 1;
+    while (top > 0 and t[top] == 0) {
+        top = top - 1;
+    }
+    fh:decnum = limbs2(t, top) * pow2(24 * to:64(top - 1 - len));
+    fl:decnum = limbs2(t, top - 2) * pow2(24 * to:64(top - 3 - len));
+    fz:decnum = limbs2(t, top - 4) * pow2(24 * to:64(top - 5 - len));
+    // (fh + fl + fz) × π/2 を、hi + lo の 2 つで表す。
+    p:decnum = fh * PIO2_HI;
+    small:decnum = (fz * PIO2_HI + fl * PIO2_LO) + (fh * PIO2_LO + prod_err(fh, PIO2_HI, p));
+    rest:decnum = small + fl * PIO2_HI;
+    hi:decnum = p + rest;
+    lo:decnum = (p - hi) + rest;
+    if (negative != (x < 0.0)) {
+        hi = -hi;
+        lo = -lo;
+    }
+    rem_hi = hi;
+    rem_lo = lo;
+    if (x < 0.0) {
+        return -n;
+    }
+    return n;
+}
+
+// t[i] と t[i - 1] をつないだ数（48 ビット）。範囲の外は 0。
+function decnum limbs2(t:array:64, i:32) {
+    v:64 = 0;
+    if (i >= 0) {
+        v = t[i] << 24;
+    }
+    if (i >= 1) {
+        v = v + t[i - 1];
+    }
+    return to:decnum(v);
+}
+
+// a × b を p に丸めたときの誤差（a × b = p + 誤差 が、ちょうど成り立つ）。
+function decnum prod_err(a:decnum, b:decnum, p:decnum) {
+    ah:decnum = split_hi(a);
+    al:decnum = a - ah;
+    bh:decnum = split_hi(b);
+    bl:decnum = b - bh;
+    return ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+
+// a の上半分の桁（残りは a - split_hi(a)）。
+function decnum split_hi(a:decnum) {
+    c:decnum = 134217729.0 * a;
+    return c - (c - a);
+}
+
+// ---------------- 逆三角関数 ----------------
+
+immutable AT0:decnum = 3.33333333333329318027e-01;
+immutable AT1:decnum = -1.99999999998764832476e-01;
+immutable AT2:decnum = 1.42857142725034663711e-01;
+immutable AT3:decnum = -1.11111104054623557880e-01;
+immutable AT4:decnum = 9.09088713343650656196e-02;
+immutable AT5:decnum = -7.69187620504482999495e-02;
+immutable AT6:decnum = 6.66107313738753120669e-02;
+immutable AT7:decnum = -5.83357013379057348645e-02;
+immutable AT8:decnum = 4.97687799461593236017e-02;
+immutable AT9:decnum = -3.65315727442169155270e-02;
+immutable AT10:decnum = 1.62858201153657823623e-02;
+immutable ATAN_HI:array:decnum = [0.4636476090008061, 0.7853981633974483, 0.982793723247329, 1.5707963267948966];
+immutable ATAN_LO:array:decnum = [2.2698777452961687e-17, 3.061616997868383e-17, 1.3903311031230998e-17, 6.123233995736766e-17];
+
+export function decnum atan(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax >= 7.378697629483821e+19) {
+        if (x < 0.0) {
+            return -PIO2_HI;
+        }
+        return PIO2_HI;
+    }
+    id:32 = -1;
+    v:decnum = x;
+    if (ax < 0.4375) {
+        if (ax < 7.450580596923828e-09) {
+            return x;
+        }
+    } else if (ax < 0.6875) {
+        id = 0;
+        v = (2.0 * ax - 1.0) / (2.0 + ax);
+    } else if (ax < 1.1875) {
+        id = 1;
+        v = (ax - 1.0) / (ax + 1.0);
+    } else if (ax < 2.4375) {
+        id = 2;
+        v = (ax - 1.5) / (1.0 + 1.5 * ax);
+    } else {
+        id = 3;
+        v = -1.0 / ax;
+    }
+    z:decnum = v * v;
+    w:decnum = z * z;
+    s1:decnum = z * (AT0 + w * (AT2 + w * (AT4 + w * (AT6 + w * (AT8 + w * AT10)))));
+    s2:decnum = w * (AT1 + w * (AT3 + w * (AT5 + w * (AT7 + w * AT9))));
+    if (id < 0) {
+        return v - v * (s1 + s2);
+    }
+    r:decnum = ATAN_HI[id] - ((v * (s1 + s2) - ATAN_LO[id]) - v);
+    if (x < 0.0) {
+        return -r;
+    }
+    return r;
+}
+
+// 点 (x, y) の向き（x 軸からの角度。-π〜π）。
+export function decnum atan2(y:decnum, x:decnum) {
+    x_negative:bool = sys.bits(x) < 0;
+    y_negative:bool = sys.bits(y) < 0;
+    if (y == 0.0) {
+        if (not x_negative) {
+            return y;
+        }
+        if (y_negative) {
+            return -PI;
+        }
+        return PI;
+    }
+    if (x == 0.0) {
+        if (y_negative) {
+            return -PIO2_HI;
+        }
+        return PIO2_HI;
+    }
+    // |y/x| がとても大きい・とても小さいときは、割り算をしない（範囲を超えないように）。
+    ex:64 = (sys.bits(x) >> 52) and 2047;
+    ey:64 = (sys.bits(y) >> 52) and 2047;
+    if (ey - ex > 64) {
+        if (y_negative) {
+            return -PIO2_HI;
+        }
+        return PIO2_HI;
+    }
+    z:decnum = 0.0;
+    if (not (x_negative and ex - ey > 64)) {
+        z = atan(abs(y / x));
+    }
+    if (not x_negative) {
+        if (y_negative) {
+            return -z;
+        }
+        return z;
+    }
+    if (y_negative) {
+        return (z - PI_LO) - PI;
+    }
+    return PI - (z - PI_LO);
+}
+
+immutable PS0:decnum = 1.66666666666666657415e-01;
+immutable PS1:decnum = -3.25565818622400915405e-01;
+immutable PS2:decnum = 2.01212532134862925881e-01;
+immutable PS3:decnum = -4.00555345006794114027e-02;
+immutable PS4:decnum = 7.91534994289814532176e-04;
+immutable PS5:decnum = 3.47933107596021167570e-05;
+immutable QS1:decnum = -2.40339491173441421878e+00;
+immutable QS2:decnum = 2.02094576023350569471e+00;
+immutable QS3:decnum = -6.88283971605453293030e-01;
+immutable QS4:decnum = 7.70381505559019352791e-02;
+
+function decnum asin_r(z:decnum) {
+    p:decnum = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
+    q:decnum = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
+    return p / q;
+}
+
+export function decnum asin(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax > 1.0) {
+        orz_rt_fail("math.asin に -1〜1 の外の数 " + to:string(x) + " が渡されました");
+    }
+    if (ax == 1.0) {
+        return x * PIO2_HI;
+    }
+    if (ax < 0.5) {
+        if (ax < 1.4901161193847656e-08) {
+            return x;
+        }
+        return x + x * asin_r(x * x);
+    }
+    z:decnum = (1.0 - ax) * 0.5;
+    s:decnum = sqrt(z);
+    r:decnum = asin_r(z);
+    res:decnum = 0.0;
+    if (ax >= 0.9749999046325684) {
+        res = PIO2_HI - (2.0 * (s + s * r) - PIO2_LO);
+    } else {
+        // f + c = √z
+        f:decnum = clear_low(s);
+        c:decnum = (z - f * f) / (s + f);
+        res = 0.5 * PIO2_HI - (2.0 * s * r - (PIO2_LO - 2.0 * c) - (0.5 * PIO2_HI - 2.0 * f));
+    }
+    if (x < 0.0) {
+        return -res;
+    }
+    return res;
+}
+
+export function decnum acos(x:decnum) {
+    ax:decnum = abs(x);
+    if (ax > 1.0) {
+        orz_rt_fail("math.acos に -1〜1 の外の数 " + to:string(x) + " が渡されました");
+    }
+    if (x == 1.0) {
+        return 0.0;
+    }
+    if (x == -1.0) {
+        return PI;
+    }
+    if (ax < 0.5) {
+        if (ax < 6.938893903907228e-18) {
+            return PIO2_HI;
+        }
+        return PIO2_HI - (x - (PIO2_LO - x * asin_r(x * x)));
+    }
+    if (x < 0.0) {
+        z1:decnum = (1.0 + x) * 0.5;
+        s1:decnum = sqrt(z1);
+        w1:decnum = asin_r(z1) * s1 - PIO2_LO;
+        return 2.0 * (PIO2_HI - (s1 + w1));
+    }
+    z:decnum = (1.0 - x) * 0.5;
+    s:decnum = sqrt(z);
+    df:decnum = clear_low(s);
+    c:decnum = (z - df * df) / (s + df);
+    w:decnum = asin_r(z) * s + c;
+    return 2.0 * (df + w);
+}
+
+// ---------------- 中で使うもの ----------------
+
+// 下の 32 ビットを 0 にする。
+function decnum clear_low(x:decnum) {
+    return sys.from_bits((sys.bits(x) >> 32) << 32);
+}
+
+// 2 の k 乗（-1022 <= k <= 1023）。
+function decnum pow2(k:64) {
+    return sys.from_bits((k + 1023) << 52);
+}
