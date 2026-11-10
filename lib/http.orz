@@ -1,0 +1,752 @@
+// http：HTTP のサーバーとクライアント（標準ライブラリ）
+//
+// import http; で使う。
+//
+// サーバー：リクエスト 1 つにつき、渡した関数が 1 回呼ばれる。その関数が返したものが、返事になる。
+//
+//     function http.Response answer(request:http.Request) {
+//         if (request.path == "/") {
+//             return http.html("<h1>こんにちは</h1>");
+//         }
+//         return http.not_found();
+//     }
+//
+//     function nothing main() {
+//         if (not http.serve("127.0.0.1", 8080, answer)) {
+//             stdio.print(stdio.last_error());
+//         }
+//     }
+//
+// クライアント：
+//
+//     r:maybe:http.Response = http.get("http://127.0.0.1:8080/");
+//     if (r != null) {
+//         stdio.print(r.body);
+//     }
+//
+// 失敗したら null（か false）を返し、理由は stdio.last_error() で取れる。
+//
+// まだできないこと：https、名前で書いたホスト（IP アドレスか localhost だけ）、
+// 同時に何人もの相手をすること（1 人ずつ順に返事をする）、接続の使い回し（返事のたびに閉じる）。
+
+import socket;
+import strings;
+import maps;
+
+extern function nothing orz_rt_set_error_text(msg:string);
+
+// 届いたリクエスト。
+export struct Request {
+    // "GET"、"POST" など。
+    method:string;
+    // "/hello" のような場所（? より前。%E3%81%82 のような書き方は、元の文字に戻してある）。
+    path:string;
+    // ? より後ろ（なければ ""）。1 つずつ取り出すには http.query を使う。
+    query:string;
+    // ヘッダ。名前は小文字にそろえてある。取り出すには http.header を使う。
+    headers:maps.Map:string;
+    body:string;
+}
+
+// 返事。
+export struct Response {
+    // 200（成功）、404（ない）など。
+    status:32;
+    headers:maps.Map:string;
+    body:string;
+}
+
+// リクエストの本文の大きさの上限（バイト）。これより大きいリクエストは断る。
+export max_body:32 = 16777216;
+
+immutable MAX_HEAD:32 = 65536;
+
+stopping:bool = false;
+
+// ---------------- 返事を作る ----------------
+
+// 番号（status）と、中身の種類（content_type）と、本文を決めて、返事を作る。
+export function Response respond(status:32, content_type:string, body:string) {
+    headers:maps.Map:string = maps.new();
+    maps.put(headers, "content-type", clean(content_type));
+    return Response(status, headers, body);
+}
+
+// ふつうの文字の返事。
+export function Response text(body:string) {
+    return respond(200, "text/plain; charset=utf-8", body);
+}
+
+// HTML の返事。
+export function Response html(body:string) {
+    return respond(200, "text/html; charset=utf-8", body);
+}
+
+// JSON の返事（body は、JSON の形の文字列）。
+export function Response json(body:string) {
+    return respond(200, "application/json", body);
+}
+
+// 「ありません」の返事（404）。
+export function Response not_found() {
+    return respond(404, "text/plain; charset=utf-8", "404 Not Found\n");
+}
+
+// 別の場所へ行ってもらう返事（302）。
+export function Response redirect(url:string) {
+    r:Response = respond(302, "text/plain; charset=utf-8", "");
+    set_header(r, "Location", url);
+    return r;
+}
+
+// 返事にヘッダを足す（同じ名前があれば置き換える）。
+export function nothing set_header(r:Response, name:string, value:string) {
+    maps.put(r.headers, strings.lower(clean(name)), clean(value));
+}
+
+// < や & などを、HTML の中にそのまま書ける形にする。
+// 相手から届いた文字を HTML に入れるときは、必ずこれを通す（通さないと、相手の書いたタグがそのまま動いてしまう）。
+export function string html_escape(s:string) {
+    r:string = strings.replace(s, "&", "&amp;");
+    r = strings.replace(r, "<", "&lt;");
+    r = strings.replace(r, ">", "&gt;");
+    r = strings.replace(r, "\"", "&quot;");
+    return strings.replace(r, "'", "&#39;");
+}
+
+// ---------------- リクエストや返事を調べる ----------------
+
+// ヘッダを取り出す（名前の大文字・小文字は区別しない）。なければ null。
+// http.header(request.headers, "User-Agent") のように使う。
+export function maybe:string header(headers:maps.Map:string, name:string) {
+    return maps.get(headers, strings.lower(name));
+}
+
+// URL の ? より後ろ（/search?word=orz の word など）から、name の値を取り出す。なければ null。
+export function maybe:string query(request:Request, name:string) {
+    return find_param(request.query, name);
+}
+
+// フォームで送られてきた本文から、name の値を取り出す。なければ null。
+export function maybe:string form(request:Request, name:string) {
+    kind:maybe:string = header(request.headers, "content-type");
+    if (kind == null) {
+        return null;
+    }
+    if (not strings.starts_with(strings.lower(kind), "application/x-www-form-urlencoded")) {
+        return null;
+    }
+    return find_param(request.body, name);
+}
+
+// %E3%81%82 のような書き方を、元の文字に戻す。形が正しくなければ null。
+export function maybe:string url_decode(s:string) {
+    return decode(s, false);
+}
+
+// URL に入れられない文字を、%E3%81%82 のような書き方にする。
+export function string url_encode(s:string) {
+    digits:pointer:8 = bytes("0123456789ABCDEF");
+    p:pointer:8 = bytes(s);
+    b:strings.Builder = strings.builder();
+    i:32 = 0;
+    while (i < length(s)) {
+        c:8 = p[i];
+        plain:bool = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122);
+        if (plain or c == 45 or c == 95 or c == 46 or c == 126) {
+            strings.add_byte(b, c);
+        } else {
+            strings.add_byte(b, 37);
+            strings.add_byte(b, digits[to:32(c) / 16]);
+            strings.add_byte(b, digits[to:32(c) % 16]);
+        }
+        i = i + 1;
+    }
+    return strings.text(b);
+}
+
+// ---------------- サーバー ----------------
+
+// host の port 番で待ち受けて、リクエストが来るたびに handler を呼び、返ってきたものを返事にする。
+// 待ち受けられなければ false。http.stop() が呼ばれるまで、戻ってこない。
+export function bool serve(host:string, port:32, handler:function:Response(Request)) {
+    server:maybe:socket.Listener = socket.listen(host, port);
+    if (server == null) {
+        return false;
+    }
+    serve_on(server, handler);
+    socket.stop(server);
+    return true;
+}
+
+// すでに待ち受けているもの（socket.listen で作ったもの）で、リクエストに返事をし続ける。
+export function nothing serve_on(server:socket.Listener, handler:function:Response(Request)) {
+    stopping = false;
+    while (not stopping) {
+        c:maybe:socket.Conn = socket.accept(server);
+        if (c == null) {
+            continue;
+        }
+        // 何も送ってこない相手を、いつまでも待たない。
+        socket.set_timeout(c, 30);
+        request:maybe:Request = read_request(c);
+        if (request != null) {
+            answer:Response = handler(request);
+            write_response(c, answer, request.method == "HEAD");
+        }
+        socket.close(c);
+    }
+}
+
+// 今の返事を送り終えたら、serve をやめる。
+export function nothing stop() {
+    stopping = true;
+}
+
+// リクエストを 1 つ読む。読めなければ null（形が正しくなければ、相手に断りの返事をしてから）。
+export function maybe:Request read_request(c:socket.Conn) {
+    b:strings.Builder = strings.builder();
+    data:string = "";
+    head_end:32 = -1;
+    while (head_end < 0) {
+        part:maybe:string = socket.read(c, 8192);
+        if (part == null) {
+            return null;
+        }
+        if (length(part) == 0) {
+            fail("リクエストの途中で、相手が接続を閉じました");
+            return null;
+        }
+        strings.add(b, part);
+        data = strings.text(b);
+        // 前に調べたところは、もう調べない。
+        head_end = find_blank_line(data, length(data) - length(part) - 3);
+        if (head_end < 0 and length(data) > MAX_HEAD) {
+            return refuse(c, 431, "リクエストのヘッダが大きすぎます");
+        }
+    }
+    if (head_end > MAX_HEAD) {
+        return refuse(c, 431, "リクエストのヘッダが大きすぎます");
+    }
+    body_start:32 = head_end + blank_line_size(data, head_end);
+    lines:array:string = split_lines(strings.slice(data, 0, head_end));
+    // 1 行目は「GET /path HTTP/1.1」の形。
+    first:array:string = strings.split(lines[0], " ");
+    if (length(first) != 3) {
+        return refuse(c, 400, "リクエストの 1 行目が正しくありません");
+    }
+    if (not strings.starts_with(first[2], "HTTP/1.") or not strings.starts_with(first[1], "/")) {
+        return refuse(c, 400, "リクエストの 1 行目が正しくありません");
+    }
+    headers:maybe:maps.Map:string = parse_headers(lines);
+    if (headers == null) {
+        return refuse(c, 400, "リクエストのヘッダが正しくありません");
+    }
+    target:string = first[1];
+    raw_path:string = target;
+    query_part:string = "";
+    mark:32 = strings.find(target, "?", 0);
+    if (mark >= 0) {
+        raw_path = strings.slice(target, 0, mark);
+        query_part = strings.slice(target, mark + 1, length(target));
+    }
+    path:maybe:string = decode(raw_path, false);
+    if (path == null) {
+        return refuse(c, 400, "パスの % の使い方が正しくありません");
+    }
+    if (maps.has(headers, "transfer-encoding")) {
+        return refuse(c, 501, "本文を分けて送る形（chunked）のリクエストには、まだ対応していません");
+    }
+    // 本文は、Content-Length に書いてある大きさだけ読む。
+    body:string = "";
+    size_text:maybe:string = maps.get(headers, "content-length");
+    if (size_text != null) {
+        want:maybe:32 = to:32(strings.trim(size_text));
+        if (want == null) {
+            return refuse(c, 400, "Content-Length が正しくありません");
+        }
+        if (want < 0) {
+            return refuse(c, 400, "Content-Length が正しくありません");
+        }
+        if (want > max_body) {
+            return refuse(c, 413, "リクエストの本文が大きすぎます");
+        }
+        body = strings.slice(data, body_start, length(data));
+        if (length(body) < want) {
+            // 「送ってよいか」と聞かれていたら、「どうぞ」と返す。
+            expect:maybe:string = maps.get(headers, "expect");
+            if (expect != null) {
+                if (strings.lower(expect) == "100-continue") {
+                    socket.write(c, "HTTP/1.1 100 Continue\r\n\r\n");
+                }
+            }
+            rest:strings.Builder = strings.builder();
+            strings.add(rest, body);
+            while (strings.count(rest) < want) {
+                more:maybe:string = socket.read(c, 65536);
+                if (more == null) {
+                    return null;
+                }
+                if (length(more) == 0) {
+                    fail("リクエストの途中で、相手が接続を閉じました");
+                    return null;
+                }
+                strings.add(rest, more);
+            }
+            body = strings.text(rest);
+        }
+        if (length(body) > want) {
+            body = strings.slice(body, 0, want);
+        }
+    }
+    return Request(first[0], path, query_part, headers, body);
+}
+
+// 返事を送る。head_only なら、本文は送らない（HEAD のリクエストへの返事）。
+export function bool write_response(c:socket.Conn, r:Response, head_only:bool) {
+    b:strings.Builder = strings.builder();
+    strings.add(b, "HTTP/1.1 " + to:string(r.status) + " " + reason(r.status) + "\r\n");
+    names:array:string = maps.keys(r.headers);
+    i:32 = 0;
+    while (i < length(names)) {
+        name:string = names[i];
+        // 大きさと、接続を閉じることは、こちらで書く。
+        if (name != "content-length" and name != "connection") {
+            value:maybe:string = maps.get(r.headers, name);
+            if (value != null) {
+                strings.add(b, canonical(name) + ": " + value + "\r\n");
+            }
+        }
+        i = i + 1;
+    }
+    // 本文を付けない決まりの返事。
+    no_body:bool = r.status < 200 or r.status == 204 or r.status == 304;
+    if (not no_body) {
+        strings.add(b, "Content-Length: " + to:string(length(r.body)) + "\r\n");
+    }
+    strings.add(b, "Connection: close\r\n\r\n");
+    if (not head_only and not no_body) {
+        strings.add(b, r.body);
+    }
+    return socket.write(c, strings.text(b));
+}
+
+// ---------------- クライアント ----------------
+
+// url の中身を取ってくる。url は "http://127.0.0.1:8080/path" の形。
+export function maybe:Response get(url:string) {
+    return fetch("GET", url, "", "");
+}
+
+// url に body を送って、返事を受け取る。content_type は body の種類（"application/json" など）。
+export function maybe:Response post(url:string, content_type:string, body:string) {
+    return fetch("POST", url, content_type, body);
+}
+
+// 相手から届いた返事（ヘッダと本文をつないだもの）を、Response にする。
+export function maybe:Response parse_response(raw:string) {
+    head_end:32 = find_blank_line(raw, 0);
+    if (head_end < 0) {
+        fail("返事が HTTP の形ではありません");
+        return null;
+    }
+    lines:array:string = split_lines(strings.slice(raw, 0, head_end));
+    // 1 行目は「HTTP/1.1 200 OK」の形。
+    first:array:string = strings.split(lines[0], " ");
+    if (length(first) < 2) {
+        fail("返事が HTTP の形ではありません");
+        return null;
+    }
+    status:maybe:32 = to:32(first[1]);
+    if (status == null or not strings.starts_with(first[0], "HTTP/")) {
+        fail("返事が HTTP の形ではありません");
+        return null;
+    }
+    headers:maybe:maps.Map:string = parse_headers(lines);
+    if (headers == null) {
+        fail("返事のヘッダが正しくありません");
+        return null;
+    }
+    body:string = strings.slice(raw, head_end + blank_line_size(raw, head_end), length(raw));
+    encoding:maybe:string = maps.get(headers, "transfer-encoding");
+    chunked:bool = false;
+    if (encoding != null) {
+        chunked = strings.contains(strings.lower(encoding), "chunked");
+    }
+    if (chunked) {
+        whole:maybe:string = dechunk(body);
+        if (whole == null) {
+            fail("返事の本文（chunked）の形が正しくありません");
+            return null;
+        }
+        body = whole;
+    } else {
+        size_text:maybe:string = maps.get(headers, "content-length");
+        if (size_text != null) {
+            want:maybe:32 = to:32(strings.trim(size_text));
+            if (want != null) {
+                if (want >= 0 and want < length(body)) {
+                    body = strings.slice(body, 0, want);
+                }
+            }
+        }
+    }
+    return Response(status, headers, body);
+}
+
+function maybe:Response fetch(method:string, url:string, content_type:string, body:string) {
+    if (strings.starts_with(url, "https://")) {
+        fail("https は、まだ使えません（http:// だけです）");
+        return null;
+    }
+    if (not strings.starts_with(url, "http://")) {
+        fail("URL は http://ホスト:ポート/パス の形で書きます");
+        return null;
+    }
+    // url を「ホスト:ポート」と「/ から後ろ」に分ける。# より後ろは送らない。
+    rest:string = strings.slice(url, 7, length(url));
+    hash:32 = strings.find(rest, "#", 0);
+    if (hash >= 0) {
+        rest = strings.slice(rest, 0, hash);
+    }
+    host_port:string = rest;
+    target:string = "/";
+    slash:32 = strings.find(rest, "/", 0);
+    if (slash >= 0) {
+        host_port = strings.slice(rest, 0, slash);
+        target = strings.slice(rest, slash, length(rest));
+    }
+    host:string = host_port;
+    port:32 = 80;
+    colon:32 = strings.find(host_port, ":", 0);
+    if (colon >= 0) {
+        host = strings.slice(host_port, 0, colon);
+        number:maybe:32 = to:32(strings.slice(host_port, colon + 1, length(host_port)));
+        if (number == null) {
+            fail("URL のポートの番号が正しくありません");
+            return null;
+        }
+        port = number;
+    }
+    c:maybe:socket.Conn = socket.connect(host, port);
+    if (c == null) {
+        return null;
+    }
+    socket.set_timeout(c, 30);
+    b:strings.Builder = strings.builder();
+    strings.add(b, method + " " + strings.replace(clean(target), " ", "%20") + " HTTP/1.1\r\n");
+    strings.add(b, "Host: " + clean(host_port) + "\r\nConnection: close\r\nAccept-Encoding: identity\r\n");
+    if (method == "POST") {
+        strings.add(b, "Content-Type: " + clean(content_type) + "\r\n");
+        strings.add(b, "Content-Length: " + to:string(length(body)) + "\r\n");
+    }
+    strings.add(b, "\r\n");
+    strings.add(b, body);
+    if (not socket.write(c, strings.text(b))) {
+        socket.close(c);
+        return null;
+    }
+    // 相手が閉じるまで読む。
+    data:strings.Builder = strings.builder();
+    while (true) {
+        part:maybe:string = socket.read(c, 65536);
+        if (part == null) {
+            // 時間切れなどでも、届いた分で返事になっていれば使う。
+            if (strings.count(data) == 0) {
+                socket.close(c);
+                return null;
+            }
+            break;
+        }
+        if (length(part) == 0) {
+            break;
+        }
+        strings.add(data, part);
+        if (strings.count(data) > max_body + MAX_HEAD) {
+            socket.close(c);
+            fail("返事が大きすぎます");
+            return null;
+        }
+    }
+    socket.close(c);
+    return parse_response(strings.text(data));
+}
+
+// ---------------- 中で使うもの ----------------
+
+function nothing fail(why:string) {
+    orz_rt_set_error_text(why);
+}
+
+// 相手に断りの返事をして、理由を覚えて、null を返す。
+function maybe:Request refuse(c:socket.Conn, status:32, why:string) {
+    message:string = to:string(status) + " " + reason(status) + "\n";
+    write_response(c, respond(status, "text/plain; charset=utf-8", message), false);
+    discard(c);
+    fail(why);
+    return null;
+}
+
+// 送り終えたと知らせてから、相手が送りかけている残りを少しだけ読み捨てる
+// （読み残しがあるまま閉じると、返事が相手に届く前に接続が切れてしまうことがある）。
+function nothing discard(c:socket.Conn) {
+    socket.shutdown(c);
+    socket.set_timeout(c, 1);
+    i:32 = 0;
+    while (i < 16) {
+        part:maybe:string = socket.read(c, 4096);
+        if (part == null) {
+            break;
+        }
+        if (length(part) == 0) {
+            break;
+        }
+        i = i + 1;
+    }
+}
+
+// ヘッダの終わりの空行（\r\n\r\n か \n\n）を、start から探す。空行の直前の改行の位置を返す。なければ -1。
+function 32 find_blank_line(data:string, start:32) {
+    from:32 = start;
+    if (from < 0) {
+        from = 0;
+    }
+    a:32 = strings.find(data, "\r\n\r\n", from);
+    b:32 = strings.find(data, "\n\n", from);
+    if (a < 0) {
+        return b;
+    }
+    if (b >= 0 and b < a) {
+        return b;
+    }
+    return a;
+}
+
+// find_blank_line で見つけた空行の大きさ（4 か 2）。
+function 32 blank_line_size(data:string, at:32) {
+    if (strings.find(data, "\r\n\r\n", at) == at) {
+        return 4;
+    }
+    return 2;
+}
+
+// 行に分ける（改行は \r\n でも \n でもよい）。
+function array:string split_lines(head:string) {
+    lines:array:string = strings.split(head, "\n");
+    i:32 = 0;
+    while (i < length(lines)) {
+        if (strings.ends_with(lines[i], "\r")) {
+            lines[i] = strings.slice(lines[i], 0, length(lines[i]) - 1);
+        }
+        i = i + 1;
+    }
+    return lines;
+}
+
+// 2 行目からのヘッダ（「名前: 値」）を表にする。名前は小文字にそろえる。形が正しくなければ null。
+function maybe:maps.Map:string parse_headers(lines:array:string) {
+    headers:maps.Map:string = maps.new();
+    i:32 = 1;
+    while (i < length(lines)) {
+        line:string = lines[i];
+        colon:32 = strings.find(line, ":", 0);
+        if (colon <= 0) {
+            return null;
+        }
+        name:string = strings.lower(strings.trim(strings.slice(line, 0, colon)));
+        value:string = strings.trim(strings.slice(line, colon + 1, length(line)));
+        // 同じ名前が 2 回あれば、", " でつなぐ。
+        old:maybe:string = maps.get(headers, name);
+        if (old != null) {
+            value = old + ", " + value;
+        }
+        maps.put(headers, name, value);
+        i = i + 1;
+    }
+    return headers;
+}
+
+// 「a=1&b=2」の形から、name の値を取り出す。
+function maybe:string find_param(encoded:string, name:string) {
+    pairs:array:string = strings.split(encoded, "&");
+    i:32 = 0;
+    while (i < length(pairs)) {
+        pair:string = pairs[i];
+        key:string = pair;
+        value:string = "";
+        eq:32 = strings.find(pair, "=", 0);
+        if (eq >= 0) {
+            key = strings.slice(pair, 0, eq);
+            value = strings.slice(pair, eq + 1, length(pair));
+        }
+        k:maybe:string = decode(key, true);
+        if (k != null) {
+            if (k == name) {
+                return decode(value, true);
+            }
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+// %xx を元のバイトに戻す。plus が true なら、+ を空白にする。形が正しくなければ null。
+function maybe:string decode(s:string, plus:bool) {
+    p:pointer:8 = bytes(s);
+    b:strings.Builder = strings.builder();
+    i:32 = 0;
+    while (i < length(s)) {
+        c:8 = p[i];
+        if (c == 37) {
+            if (i + 2 >= length(s)) {
+                return null;
+            }
+            hi:32 = hex_value(p[i + 1]);
+            lo:32 = hex_value(p[i + 2]);
+            if (hi < 0 or lo < 0) {
+                return null;
+            }
+            strings.add_byte(b, to:8(hi * 16 + lo));
+            i = i + 3;
+        } else {
+            if (c == 43 and plus) {
+                c = 32;
+            }
+            strings.add_byte(b, c);
+            i = i + 1;
+        }
+    }
+    return strings.text(b);
+}
+
+// 16 進の 1 文字の値。16 進の文字でなければ -1。
+function 32 hex_value(c:8) {
+    if (c >= 48 and c <= 57) {
+        return to:32(c) - 48;
+    }
+    if (c >= 65 and c <= 70) {
+        return to:32(c) - 55;
+    }
+    if (c >= 97 and c <= 102) {
+        return to:32(c) - 87;
+    }
+    return -1;
+}
+
+// 分けて送られてきた本文（chunked）を、1 つにつなぐ。形が正しくなければ null。
+function maybe:string dechunk(s:string) {
+    p:pointer:8 = bytes(s);
+    b:strings.Builder = strings.builder();
+    pos:32 = 0;
+    while (true) {
+        line_end:32 = strings.find(s, "\r\n", pos);
+        if (line_end < 0) {
+            return null;
+        }
+        // かたまりの大きさ（16 進）。; や空白より後ろは見ない。
+        n:32 = 0;
+        digits:32 = 0;
+        i:32 = pos;
+        while (i < line_end and p[i] != 59 and p[i] != 32 and p[i] != 9) {
+            v:32 = hex_value(p[i]);
+            if (v < 0 or n > 16777215) {
+                return null;
+            }
+            n = n * 16 + v;
+            digits = digits + 1;
+            i = i + 1;
+        }
+        if (digits == 0) {
+            return null;
+        }
+        pos = line_end + 2;
+        if (n == 0) {
+            return strings.text(b);
+        }
+        if (pos + n + 2 > length(s)) {
+            return null;
+        }
+        strings.add(b, strings.slice(s, pos, pos + n));
+        pos = pos + n + 2;
+    }
+    return null;
+}
+
+// 改行を空白にする（ヘッダの値に改行が入ると、相手に別のヘッダとして読まれてしまうため）。
+function string clean(s:string) {
+    return strings.replace(strings.replace(s, "\r", " "), "\n", " ");
+}
+
+// "content-type" を "Content-Type" にする。
+function string canonical(name:string) {
+    p:pointer:8 = bytes(name);
+    b:strings.Builder = strings.builder();
+    up:bool = true;
+    i:32 = 0;
+    while (i < length(name)) {
+        c:8 = p[i];
+        if (up and c >= 97 and c <= 122) {
+            c = c - 32;
+        }
+        strings.add_byte(b, c);
+        up = c == 45;
+        i = i + 1;
+    }
+    return strings.text(b);
+}
+
+// 番号に付ける短い説明。
+function string reason(status:32) {
+    if (status == 200) {
+        return "OK";
+    }
+    if (status == 201) {
+        return "Created";
+    }
+    if (status == 204) {
+        return "No Content";
+    }
+    if (status == 301) {
+        return "Moved Permanently";
+    }
+    if (status == 302) {
+        return "Found";
+    }
+    if (status == 303) {
+        return "See Other";
+    }
+    if (status == 304) {
+        return "Not Modified";
+    }
+    if (status == 400) {
+        return "Bad Request";
+    }
+    if (status == 401) {
+        return "Unauthorized";
+    }
+    if (status == 403) {
+        return "Forbidden";
+    }
+    if (status == 404) {
+        return "Not Found";
+    }
+    if (status == 405) {
+        return "Method Not Allowed";
+    }
+    if (status == 413) {
+        return "Content Too Large";
+    }
+    if (status == 431) {
+        return "Request Header Fields Too Large";
+    }
+    if (status == 500) {
+        return "Internal Server Error";
+    }
+    if (status == 501) {
+        return "Not Implemented";
+    }
+    if (status == 503) {
+        return "Service Unavailable";
+    }
+    return "Status";
+}

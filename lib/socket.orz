@@ -26,6 +26,7 @@
 import "net.orz";
 
 extern function nothing orz_rt_set_error(code:64);
+extern function nothing orz_rt_set_error_text(msg:string);
 extern function string orz_rt_str_from_bytes(p:pointer:8, n:64);
 
 // 待ち受けているもの。
@@ -129,6 +130,21 @@ export function bool write(c:Conn, data:string) {
     return true;
 }
 
+// 読み書きで待つ時間を、seconds 秒までにする（過ぎたら失敗して、理由は「時間切れです」）。0 なら、いつまでも待つ。
+export function bool set_timeout(c:Conn, seconds:32) {
+    r:64 = net.timeout(c.fd, seconds);
+    if (r < 0) {
+        orz_rt_set_error(-r);
+        return false;
+    }
+    return true;
+}
+
+// 送り終えたことを相手に知らせる（相手の read が "" を返すようになる）。読むことは、まだできる。
+export function nothing shutdown(c:Conn) {
+    net.end_sending(c.fd);
+}
+
 // 通信を終える。
 export function nothing close(c:Conn) {
     net.close_fd(c.fd);
@@ -180,8 +196,8 @@ function maybe:array:8 parse_ip(host:string, number:32) {
         i = i + 1;
     }
     if (part != 4 or i <= length(host)) {
-        // 9001：IP アドレスでない（名前から調べることは、まだできない）。
-        orz_rt_set_error(9001);
+        // 名前から調べること（DNS）は、まだできない。
+        orz_rt_set_error_text("ホストは IP アドレス（127.0.0.1 など）か localhost で書きます");
         return null;
     }
     return ip;

@@ -767,13 +767,6 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     "sys" => (ModRef::Sys, name.clone()),
                     // orz で書いた標準ライブラリ（読み込むときに埋めてある）。
                     _ if imp.resolved.is_some() => (ModRef::File(imp.resolved.unwrap()), name.clone()),
-                    "http" => {
-                        return Err(Diag::new(
-                            imp.span,
-                            format!("標準ライブラリ `{}` はまだありません", name),
-                        )
-                        .hint("標準ライブラリの一覧は、SPEC.md の「標準ライブラリ」にあります"))
-                    }
                     _ => {
                         return Err(
                             Diag::new(imp.span, format!("標準ライブラリに `{}` はありません", name))

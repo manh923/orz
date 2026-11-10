@@ -148,6 +148,38 @@ export function string from_byte(c:8) {
     return orz_rt_str_from_bytes(bytes(to:address(a)), 1);
 }
 
+// 英字を小文字にする（A〜Z だけ。ほかの文字はそのまま）。
+export function string lower(s:string) {
+    p:pointer:8 = bytes(s);
+    b:Builder = builder();
+    i:32 = 0;
+    while (i < length(s)) {
+        c:8 = p[i];
+        if (c >= 65 and c <= 90) {
+            c = c + 32;
+        }
+        add_byte(b, c);
+        i = i + 1;
+    }
+    return text(b);
+}
+
+// 英字を大文字にする（a〜z だけ。ほかの文字はそのまま）。
+export function string upper(s:string) {
+    p:pointer:8 = bytes(s);
+    b:Builder = builder();
+    i:32 = 0;
+    while (i < length(s)) {
+        c:8 = p[i];
+        if (c >= 97 and c <= 122) {
+            c = c - 32;
+        }
+        add_byte(b, c);
+        i = i + 1;
+    }
+    return text(b);
+}
+
 // バイトの順で比べる。a が前なら -1、同じなら 0、後なら 1。
 export function 32 compare(a:string, b:string) {
     p:pointer:8 = bytes(a);

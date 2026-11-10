@@ -1,5 +1,5 @@
-// error: 標準ライブラリ `http` はまだありません
-import http;
+// error: 標準ライブラリに `gui` はありません
+import gui;
 
 function nothing main() {
 }

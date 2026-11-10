@@ -10,6 +10,8 @@ extern "ws2_32.dll" function 32 recv(s:64, buf:array:8, n:32, flags:32);
 extern "ws2_32.dll" function 32 send(s:64, buf:pointer:8, n:32, flags:32);
 extern "ws2_32.dll" function 32 closesocket(s:64);
 extern "ws2_32.dll" function 32 getsockname(s:64, addr:array:8, n:array:8);
+extern "ws2_32.dll" function 32 setsockopt(s:64, level:32, name:32, value:array:8, n:32);
+extern "ws2_32.dll" function 32 shutdown(s:64, how:32);
 
 started:bool = false;
 
@@ -136,6 +138,24 @@ export function 64 transmit(fd:64, p:pointer:8, n:32) {
         return failure();
     }
     return to:64(r);
+}
+
+// 読み書きで待つ時間を、seconds 秒までにする（SO_RCVTIMEO と SO_SNDTIMEO。ミリ秒で渡す）。0 なら、いつまでも待つ。
+export function 64 timeout(fd:64, seconds:32) {
+    ms:64 = to:64(seconds) * 1000;
+    t:array:8 = [to:8(ms % 256), to:8(ms / 256 % 256), to:8(ms / 65536 % 256), to:8(ms / 16777216 % 256)];
+    if (setsockopt(fd, 65535, 4102, t, 4) != 0 or setsockopt(fd, 65535, 4101, t, 4) != 0) {
+        return failure();
+    }
+    return 0;
+}
+
+// 送り終えたことを相手に知らせる（shutdown の SD_SEND）。読むことは、まだできる。
+export function 64 end_sending(fd:64) {
+    if (shutdown(fd, 1) != 0) {
+        return failure();
+    }
+    return 0;
 }
 
 export function 64 close_fd(fd:64) {

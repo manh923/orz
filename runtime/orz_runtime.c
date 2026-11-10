@@ -1683,6 +1683,9 @@ void *orz_rt_array_copy(const char *a, i64 elem_size, i64 scan) {
 // ---------------- 入力とファイル ----------------
 
 static i64 last_errno;
+// last_errno がこの値なら、理由は error_text にある（orz で書いた標準ライブラリが決めた文）。
+#define ERROR_TEXT (-1)
+static char error_text[256];
 
 // 伸びるバッファ。古いものは捨てる（GC が入るまでは解放しない）。
 struct buf {
@@ -1792,6 +1795,9 @@ char *orz_rt_last_error(void) {
     switch (last_errno) {
     case 0:
         return str_empty.s;
+    case ERROR_TEXT:
+        m = error_text;
+        break;
     case 2:
         m = "ファイルやフォルダがありません";
         break;
@@ -1847,9 +1853,6 @@ char *orz_rt_last_error(void) {
     case 111:
         m = "接続を断られました（相手が待ち受けていません）";
         break;
-    case 9001:
-        m = "ホストは IP アドレス（127.0.0.1 など）か localhost で書きます";
-        break;
     default: {
         int win = last_errno >= WIN_ERROR_BASE;
         char a[24], *num = fmt_long(a, win ? last_errno - WIN_ERROR_BASE : last_errno);
@@ -1904,6 +1907,15 @@ char *orz_rt_str_from_bytes(const char *p, i64 n) { return str_from(p, n); }
 
 // 失敗の理由（Linux の errno の番号）を覚える。orz で書いた標準ライブラリから呼ぶ。stdio.last_error() で取れる。
 void orz_rt_set_error(i64 code) { last_errno = code; }
+
+// 失敗の理由を、文で覚える（255 バイトまで）。
+void orz_rt_set_error_text(const char *msg) {
+    i64 n = str_len(msg);
+    if (n > (i64)sizeof error_text - 1) n = sizeof error_text - 1;
+    memcpy(error_text, msg, n);
+    error_text[n] = 0;
+    last_errno = ERROR_TEXT;
+}
 
 // 実行時エラーで止まる（標準ライブラリで、範囲外などを知らせる）。
 __attribute__((noreturn)) void orz_rt_fail(const char *msg) {

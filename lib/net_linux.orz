@@ -53,6 +53,10 @@ export function 64 connect_ip(fd:64, ip:array:8, port:32) {
 export function 64 receive(fd:64, buf:array:8, max:32) {
     while (true) {
         r:64 = sys.call(0, fd, buf, max);
+        if (r == -11) {
+            // 待つ時間（timeout）を過ぎた。「時間切れ」として返す。
+            return -110;
+        }
         if (r != -4) {
             return r;
         }
@@ -60,16 +64,34 @@ export function 64 receive(fd:64, buf:array:8, max:32) {
     return -4;
 }
 
+// 読み書きで待つ時間を、seconds 秒までにする（SO_RCVTIMEO と SO_SNDTIMEO）。0 なら、いつまでも待つ。
+export function 64 timeout(fd:64, seconds:32) {
+    t:array:64 = [to:64(seconds), 0];
+    r:64 = sys.call(54, fd, 1, 20, t, 16);
+    if (r < 0) {
+        return r;
+    }
+    return sys.call(54, fd, 1, 21, t, 16);
+}
+
 // p から n バイトを送って、送れたバイト数を返す。
 export function 64 transmit(fd:64, p:pointer:8, n:32) {
     while (true) {
         // sendto。MSG_NOSIGNAL（16384）：相手が閉じていても、シグナルで止まらずにエラーを返す。
         r:64 = sys.call(44, fd, p, n, 16384, 0, 0);
+        if (r == -11) {
+            return -110;
+        }
         if (r != -4) {
             return r;
         }
     }
     return -4;
+}
+
+// 送り終えたことを相手に知らせる（shutdown の SHUT_WR）。読むことは、まだできる。
+export function 64 end_sending(fd:64) {
+    return sys.call(48, fd, 1);
 }
 
 export function 64 close_fd(fd:64) {

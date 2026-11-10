@@ -257,7 +257,7 @@
       "comment": "stdio.print(…) や geom.Point(…) の、点の前の名前",
       "patterns": [
         {
-          "match": "\\b(stdio|sys|strings|lists|maps|os|bignum|math|random|crypto|socket)\\s*(?=\\.)",
+          "match": "\\b(stdio|sys|strings|lists|maps|os|bignum|math|random|crypto|socket|http)\\s*(?=\\.)",
           "captures": {
             "1": {
               "name": "entity.name.namespace.orz"

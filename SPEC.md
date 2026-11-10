@@ -526,7 +526,7 @@ extern function 32 close(fd:32);
 | `crypto` | 暗号用。今はOSの安全な乱数だけ | できた |
 | `socket` | TCPの通信 | できた |
 | `sys` | OSへの入口（システムコール、ビットの読み替え）。コンパイラが知っている | できた |
-| `http` | HTTP | まだ |
+| `http` | HTTPのサーバーとクライアント | できた |
 | `bignum` | 大きな整数 | 手順8 |
 
 ```
@@ -720,6 +720,7 @@ function nothing main() {
 | `split(s, sep)`、`join(parts, sep)` | 分ける、つなぐ |
 | `trim(s)` | 前後の空白（スペース、タブ、改行）を除く |
 | `replace(s, old, new)`、`repeat(s, n)` | 置き換える、`n`回つなぐ |
+| `lower(s)`、`upper(s)` | 英字を小文字・大文字にする（ほかの文字はそのまま） |
 | `from_byte(c:8)` | 1バイトの文字列 |
 | `compare(a, b)` | バイトの順で比べる（`-1`、`0`、`1`） |
 | `builder()`、`add(b, s)`、`add_byte(b, c)`、`count(b)`、`text(b)` | 長い文字列を少しずつ作る（`+`でつなぐと、そのたびに全体を写すので遅い） |
@@ -764,6 +765,8 @@ function nothing main() {
 | `connect(host, port)` | つなぐ（`maybe:socket.Conn`） |
 | `read(c, max)` | 届くまで待って、届いた分（多くて`max`バイト）を`string`で返す。相手が閉じていたら`""`、失敗なら`null` |
 | `write(c, data)` | `data`を全部送る（`bool`） |
+| `set_timeout(c, seconds)` | 読み書きで待つ時間を決める。過ぎたら失敗する（理由は「時間切れです」） |
+| `shutdown(c)` | 送り終えたことを相手に知らせる（読むことは、まだできる） |
 | `close(c)`、`stop(l)` | 通信を終える、待ち受けをやめる |
 
 ```
@@ -791,6 +794,56 @@ function nothing main() {
     }
 }
 ```
+
+- **`http`:** HTTPのサーバーとクライアント。`socket`の上に、orzで書いてある
+
+```
+import stdio;
+import http;
+
+function http.Response answer(request:http.Request) {
+    if (request.path == "/") {
+        return http.html("<h1>こんにちは</h1>");
+    }
+    if (request.path == "/hello") {
+        name:maybe:string = http.query(request, "name");    // /hello?name=太郎
+        if (name != null) {
+            return http.html("<p>こんにちは、" + http.html_escape(name) + " さん</p>");
+        }
+    }
+    return http.not_found();
+}
+
+function nothing main() {
+    stdio.print("http://127.0.0.1:8080/ で待っています");
+    if (not http.serve("127.0.0.1", 8080, answer)) {
+        stdio.print(stdio.last_error());
+    }
+}
+```
+
+| 関数 | 内容 |
+| --- | --- |
+| `serve(host, port, handler)` | 待ち受けて、リクエストが来るたびに`handler`（`function:http.Response(http.Request)`）を呼び、返ってきたものを返事にする。待ち受けられなければ`false`。`http.stop()`が呼ばれるまで戻らない |
+| `serve_on(server, handler)` | `socket.listen`で作ったもので、同じことをする（ポートを0にして空いている番号を使いたいときなど） |
+| `stop()` | 今の返事を送り終えたら、`serve`をやめる |
+| `text(body)`、`html(body)`、`json(body)` | 返事を作る（200） |
+| `not_found()`、`redirect(url)` | 404の返事、別の場所へ行ってもらう返事（302） |
+| `respond(status, content_type, body)` | 番号と種類を決めて返事を作る |
+| `set_header(r, name, value)` | 返事にヘッダを足す |
+| `header(headers, name)` | ヘッダを取り出す（`http.header(request.headers, "User-Agent")`）。大文字・小文字は区別しない。なければ`null` |
+| `query(request, name)`、`form(request, name)` | URLの`?`より後ろの値、フォームで送られてきた値を取り出す。なければ`null` |
+| `html_escape(s)` | `<`や`&`を、HTMLにそのまま書ける形にする |
+| `url_encode(s)`、`url_decode(s)` | `%E3%81%82`のような書き方にする、元に戻す（形が正しくなければ`null`） |
+| `get(url)`、`post(url, content_type, body)` | クライアント。返事（`maybe:http.Response`）を受け取る |
+| `read_request(c)`、`write_response(c, r, head_only)`、`parse_response(raw)` | 自分で`socket`を扱うときの部品 |
+
+- **`http.Request`:** `method`（`"GET"`など）、`path`（`?`より前。`%`の書き方は元の文字に戻してある）、`query`（`?`より後ろ）、`headers`、`body`
+- **`http.Response`:** `status`（200など）、`headers`、`body`
+- **相手から届いた文字:** HTMLに入れるときは、必ず`http.html_escape`を通す（通さないと、相手の書いたタグがそのまま動いてしまう）
+- **断るリクエスト:** 形が正しくないもの（400）、ヘッダが64KBより大きいもの（431）、本文が`http.max_body`（はじめは16MB）より大きいもの（413）。30秒何も送ってこない相手は切る
+- **ヘッダの値:** 改行は空白にする（改行を入れて、別のヘッダを紛れ込ませることはできない）
+- **まだできないこと:** https、名前で書いたホスト（IPアドレスか`localhost`だけ）、同時に何人もの相手をすること（1人ずつ順に返事をする）、接続の使い回し（返事のたびに閉じる）
 
 - **組み込み:** `allocate`、`length`、`size`、`copy`、`collect`、`bytes`、`array`は`import`なしで使える。これらの名前は、関数や変数の名前には使えない
 - **暗号:** 可変長の`bignum`は使わず、固定長で定数時間に計算する専用ライブラリを分ける

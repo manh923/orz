@@ -1,0 +1,97 @@
+// exit: 0
+// 標準ライブラリ http（同じプログラムの中で、送る側と受ける側の両方をやる）
+import stdio;
+import strings;
+import socket;
+import http;
+
+function http.Response answer(request:http.Request) {
+    if (request.path == "/hello") {
+        name:maybe:string = http.query(request, "name");
+        if (name != null) {
+            return http.html("<p>" + http.html_escape(name) + "</p>");
+        }
+    }
+    if (request.method == "POST") {
+        v:maybe:string = http.form(request, "msg");
+        if (v != null) {
+            r:http.Response = http.text("msg=" + v);
+            // 値に改行を入れても、別のヘッダにはならない
+            http.set_header(r, "X-Test", "a\r\nInjected: yes");
+            return r;
+        }
+    }
+    return http.not_found();
+}
+
+// raw を送って、受ける側で 1 回だけ返事をして、届いた返事（\r は除く）を表示する。
+function nothing exchange(server:socket.Listener, raw:string) {
+    client:maybe:socket.Conn = socket.connect("127.0.0.1", socket.port(server));
+    conn:maybe:socket.Conn = socket.accept(server);
+    if (client == null or conn == null) {
+        stdio.print("つなげません: {}", stdio.last_error());
+        return;
+    }
+    socket.write(client, raw);
+    request:maybe:http.Request = http.read_request(conn);
+    if (request != null) {
+        agent:maybe:string = http.header(request.headers, "USER-AGENT");
+        stdio.print("{} {} [{}] 本文 {} バイト {}", request.method, request.path, request.query, length(request.body), agent);
+        http.write_response(conn, answer(request), request.method == "HEAD");
+    } else {
+        stdio.print("読めません: {}", stdio.last_error());
+    }
+    socket.close(conn);
+    b:strings.Builder = strings.builder();
+    while (true) {
+        part:maybe:string = socket.read(client, 4096);
+        if (part == null) {
+            break;
+        }
+        if (length(part) == 0) {
+            break;
+        }
+        strings.add(b, part);
+    }
+    socket.close(client);
+    stdio.print(strings.replace(strings.text(b), "\r", ""));
+    stdio.print("----");
+}
+
+function nothing show(r:maybe:http.Response) {
+    if (r == null) {
+        stdio.print("失敗: {}", stdio.last_error());
+    } else {
+        stdio.print("{} [{}] {}", r.status, http.header(r.headers, "content-type"), r.body);
+    }
+}
+
+function nothing main() {
+    server:maybe:socket.Listener = socket.listen("127.0.0.1", 0);
+    if (server == null) {
+        stdio.print(stdio.last_error());
+        return;
+    }
+    exchange(server, "GET /hello?name=%3Cb%3E+%E5%A4%AA%E9%83%8E HTTP/1.1\r\nHost: x\r\nUser-Agent: test\r\n\r\n");
+    exchange(server, "POST /send HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\nmsg=a%26b+c");
+    exchange(server, "HEAD /hello?name=a HTTP/1.1\r\n\r\n");
+    exchange(server, "GET /%E3%81%82 HTTP/1.0\n\n");
+    exchange(server, "ごみ\r\n\r\n");
+    socket.stop(server);
+
+    // 返事を読む
+    show(http.parse_response("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello!!"));
+    show(http.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;x=1\r\n world\r\n0\r\n\r\n"));
+    show(http.parse_response("HTTP/1.0 404 Not Found\nContent-Type: a/b\n\nnone"));
+    show(http.parse_response("こんにちは"));
+    show(http.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"));
+    show(http.get("https://127.0.0.1/"));
+    show(http.get("127.0.0.1/"));
+    show(http.get("http://example.com/"));
+
+    // URL と HTML の文字
+    stdio.print(http.url_encode("a b&c/日本"));
+    stdio.print(http.url_decode("a%20b%26c%2F%E6%97%A5%E6%9C%AC"));
+    stdio.print(http.url_decode("%zz"));
+    stdio.print(http.html_escape("<a href=\"x\">'&'</a>"));
+}

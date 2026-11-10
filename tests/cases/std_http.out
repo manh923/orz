@@ -1,0 +1,55 @@
+GET /hello [name=%3Cb%3E+%E5%A4%AA%E9%83%8E] 本文 0 バイト test
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 23
+Connection: close
+
+<p>&lt;b&gt; 太郎</p>
+----
+POST /send [] 本文 11 バイト null
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+X-Test: a  Injected: yes
+Content-Length: 9
+Connection: close
+
+msg=a&b c
+----
+HEAD /hello [name=a] 本文 0 バイト null
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 8
+Connection: close
+
+
+----
+GET /あ [] 本文 0 バイト null
+HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=utf-8
+Content-Length: 14
+Connection: close
+
+404 Not Found
+
+----
+読めません: リクエストの 1 行目が正しくありません
+HTTP/1.1 400 Bad Request
+Content-Type: text/plain; charset=utf-8
+Content-Length: 16
+Connection: close
+
+400 Bad Request
+
+----
+200 [text/plain] hello
+200 [null] hello world
+404 [a/b] none
+失敗: 返事が HTTP の形ではありません
+失敗: 返事の本文（chunked）の形が正しくありません
+失敗: https は、まだ使えません（http:// だけです）
+失敗: URL は http://ホスト:ポート/パス の形で書きます
+失敗: ホストは IP アドレス（127.0.0.1 など）か localhost で書きます
+a%20b%26c%2F%E6%97%A5%E6%9C%AC
+a b&c/日本
+null
+&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;

@@ -1,0 +1,3 @@
+# 改行は、どの OS でも LF にそろえる（テストの .out は、出力とバイト単位で比べるため）
+* text=auto eol=lf
+*.vsix binary
