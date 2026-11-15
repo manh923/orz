@@ -827,6 +827,9 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     s.name_span,
                     TopName::GenericStruct(ctx.generic_structs.len()),
                 ),
+                Item::Enum(e) => {
+                    return Err(Diag::new(e.name_span, "`enum` は、まだ作っている途中です"))
+                }
                 Item::Import(_) => continue,
             };
             let what = match top {
@@ -870,7 +873,7 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     module: m,
                     instances: 0,
                 }),
-                Item::Import(_) => {}
+                Item::Enum(_) | Item::Import(_) => {}
             }
         }
     }
@@ -1814,6 +1817,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
             StmtKind::Assign { target, value } => self.assign(target, value)?,
             StmtKind::If { cond, then, els } => self.if_stmt(cond, then, els.as_ref())?,
             StmtKind::While { cond, body } => self.while_stmt(cond, body)?,
+            StmtKind::Match { value, .. } => {
+                return Err(Diag::new(value.span, "`match` は、まだ作っている途中です"))
+            }
             StmtKind::Break | StmtKind::Continue => {
                 let is_break = matches!(s.kind, StmtKind::Break);
                 let Some(&(head, end, depth)) = self.loops.last() else {

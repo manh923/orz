@@ -322,12 +322,16 @@ fn header_items(prog: &mut ast::Program) -> Result<(), source::Diag> {
                 None
             }
             ast::Item::Global(d) => Some(d.name_span),
+            ast::Item::Enum(e) => {
+                e.exported = true;
+                None
+            }
             ast::Item::Import(imp) => Some(imp.span),
         };
         if let Some(span) = bad {
             return Err(source::Diag::new(
                 span,
-                "`.orh` に書けるのは、`extern` の関数、`struct`、`immutable` だけです",
+                "`.orh` に書けるのは、`extern` の関数、`struct`、`enum`、`immutable` だけです",
             )
             .hint("中身のある関数や変数は `.orz` に書きます"));
         }

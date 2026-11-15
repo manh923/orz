@@ -82,6 +82,26 @@ pub enum Item {
     Global(Decl),
     Import(Import),
     Struct(StructDef),
+    Enum(EnumDef),
+}
+
+/// `enum Expr { Num(value:64); Add(left:Expr, right:Expr); }`
+#[derive(Debug)]
+pub struct EnumDef {
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantDef>,
+    /// `export` が付いているか。
+    pub exported: bool,
+}
+
+/// 列挙型の種類の 1 つ（`Num(value:64)`）。
+#[derive(Debug)]
+pub struct VariantDef {
+    pub name: String,
+    pub span: Span,
+    /// 中身。なければ空。
+    pub fields: Vec<FieldDef>,
 }
 
 #[derive(Debug)]
@@ -189,7 +209,21 @@ pub enum StmtKind {
     Continue,
     Return(Option<Expr>),
     Arena(Block),
+    /// `match (e) { Num { … } Add, Sub { … } else { … } }`
+    Match {
+        value: Expr,
+        arms: Vec<MatchArm>,
+        els: Option<Block>,
+    },
     Expr(Expr),
+}
+
+/// `match` の中の 1 つ（`Add, Sub { … }`）。
+#[derive(Debug)]
+pub struct MatchArm {
+    /// 種類の名前。いくつか並べられる。
+    pub names: Vec<(String, Span)>,
+    pub body: Block,
 }
 
 #[derive(Debug)]

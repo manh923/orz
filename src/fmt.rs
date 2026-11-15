@@ -49,6 +49,8 @@ pub fn format(src: &str) -> Result<String, Diag> {
         after_open: true,
         close_brace_last: false,
         comment_line: false,
+        pending_match: false,
+        match_depths: Vec::new(),
     };
     let mut end = 0;
     for item in &items {
@@ -94,6 +96,10 @@ struct Fmt {
     close_brace_last: bool,
     /// 今の行は、行の頭から書いた `/* */` のコメントだけ（元のソースで改行していれば、次は新しい行）。
     comment_line: bool,
+    /// `match` を見たあと、その `{` がまだ来ていない。
+    pending_match: bool,
+    /// 開いている `match { }` の中の字下げの深さ（その深さの `else` は、`}` の後ろにつなげない）。
+    match_depths: Vec<usize>,
 }
 
 impl Fmt {
@@ -124,7 +130,8 @@ impl Fmt {
     }
 
     fn token(&mut self, tok: &Tok, text: &str, newlines: usize) {
-        if *tok == Tok::Kw(Kw::Else) && self.close_brace_last {
+        let in_match = self.match_depths.last() == Some(&self.depth);
+        if *tok == Tok::Kw(Kw::Else) && self.close_brace_last && !in_match {
             // `} else`
             self.need_newline = false;
             self.out.push(' ');
@@ -152,11 +159,19 @@ impl Fmt {
                 self.depth += 1;
                 self.end_statement();
                 self.after_open = true;
+                if self.pending_match {
+                    self.pending_match = false;
+                    self.match_depths.push(self.depth);
+                }
             }
             Tok::RBrace => {
                 self.end_statement();
                 self.close_brace_last = true;
+                if self.match_depths.last().is_some_and(|d| *d > self.depth) {
+                    self.match_depths.pop();
+                }
             }
+            Tok::Kw(Kw::Match) => self.pending_match = true,
             Tok::Semi => self.end_statement(),
             _ => {}
         }

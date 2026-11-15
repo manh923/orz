@@ -96,6 +96,7 @@ impl Parser {
             Tok::Kw(Kw::Function) => Item::Func(self.func()?),
             Tok::Ident(_) => Item::Global(self.decl(false)?),
             Tok::Kw(Kw::Struct) => Item::Struct(self.struct_def()?),
+            Tok::Kw(Kw::Enum) => Item::Enum(self.enum_def()?),
             Tok::Kw(Kw::Import) if exported => {
                 return Err(Diag::new(self.span(), "`import` に `export` は付けられません"))
             }
@@ -129,9 +130,74 @@ impl Parser {
             Item::Func(f) => f.exported = exported,
             Item::Global(d) => d.exported = exported,
             Item::Struct(s) => s.exported = exported,
+            Item::Enum(e) => e.exported = exported,
             Item::Import(_) => {}
         }
         Ok(item)
+    }
+
+    /// `enum 名前 { 種類; 種類(名前:型, …); }`
+    fn enum_def(&mut self) -> PResult<EnumDef> {
+        self.bump(); // enum
+        let (name, name_span) = self.ident("列挙型の名前")?;
+        if self.peek() == &Tok::Colon {
+            return Err(Diag::new(self.span(), "ジェネリクスの `enum` は、まだ書けません"));
+        }
+        self.expect(Tok::LBrace, "列挙型の始まりの")?;
+        let mut variants = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(
+                    Diag::new(self.span(), "`}` が足りません").hint("列挙型を `}` で閉じ忘れていませんか")
+                );
+            }
+            let (vname, vspan) = self.ident("種類の名前")?;
+            let mut fields = Vec::new();
+            if self.eat(&Tok::LParen) {
+                if self.peek() == &Tok::RParen {
+                    return Err(Diag::new(self.span(), "中身のない種類には、`( )` を書きません")
+                        .hint(format!("`{};` と書きます", vname)));
+                }
+                loop {
+                    let (fname, fspan) = self.ident("中身の名前")?;
+                    if self.peek() != &Tok::Colon {
+                        return Err(
+                            Diag::new(self.span(), format!("中身 `{}` の型がありません", fname))
+                                .hint(format!("`{}:32` のように `:` と型を書きます", fname)),
+                        );
+                    }
+                    self.bump();
+                    let ty = self.type_expr()?;
+                    fields.push(FieldDef {
+                        name: fname,
+                        ty,
+                        span: fspan,
+                    });
+                    if self.eat(&Tok::Comma) {
+                        continue;
+                    }
+                    self.expect(Tok::RParen, "中身の終わりの")?;
+                    break;
+                }
+            }
+            self.semi()?;
+            variants.push(VariantDef {
+                name: vname,
+                span: vspan,
+                fields,
+            });
+        }
+        self.bump(); // }
+        if variants.is_empty() {
+            return Err(Diag::new(name_span, format!("列挙型 `{}` に、種類が 1 つもありません", name))
+                .hint("例：enum Color { Red; Green; Blue; }"));
+        }
+        Ok(EnumDef {
+            name,
+            name_span,
+            variants,
+            exported: false,
+        })
     }
 
     fn struct_def(&mut self) -> PResult<StructDef> {
@@ -501,6 +567,42 @@ impl Parser {
             Tok::Kw(Kw::Arena) => {
                 self.bump();
                 StmtKind::Arena(self.block()?)
+            }
+            Tok::Kw(Kw::Match) => {
+                self.bump();
+                let value = self.cond("match")?;
+                self.expect(Tok::LBrace, "`match` の始まりの")?;
+                let mut arms = Vec::new();
+                let mut els = None;
+                loop {
+                    match self.peek() {
+                        Tok::RBrace => break,
+                        Tok::Eof => {
+                            return Err(Diag::new(self.span(), "`}` が足りません")
+                                .hint("`match` を `}` で閉じ忘れていませんか"))
+                        }
+                        Tok::Kw(Kw::Else) => {
+                            let at = self.bump().span;
+                            if els.is_some() {
+                                return Err(Diag::new(at, "`match` の中に `else` が 2 つあります"));
+                            }
+                            els = Some(self.block()?);
+                        }
+                        _ => {
+                            if els.is_some() {
+                                return Err(Diag::new(self.span(), "`else` は、`match` の最後に書きます"));
+                            }
+                            let mut names = vec![self.ident("種類の名前")?];
+                            while self.eat(&Tok::Comma) {
+                                names.push(self.ident("種類の名前")?);
+                            }
+                            let body = self.block()?;
+                            arms.push(MatchArm { names, body });
+                        }
+                    }
+                }
+                self.bump(); // }
+                StmtKind::Match { value, arms, els }
             }
             Tok::Kw(Kw::Function) => {
                 return Err(Diag::new(lo, "関数の中に関数は書けません")
