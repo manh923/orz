@@ -21,7 +21,7 @@ orzは、Cの書きやすさと実行時の安全確認を組み合わせた、�
 ソースはUTF-8で、改行は空白と同じ扱いです。トークンの間ならどこで改行しても構いません。
 
 - **コメント:** `//`は行末まで、`/* */`は閉じるまで。整形ツールで残せるよう、字句解析ではコメントを捨てずに保持する
-- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`、`extern`、`as`
+- **キーワード:** `function`、`nothing`、`if`、`else`、`while`、`break`、`continue`、`return`、`struct`、`enum`、`match`、`immutable`、`import`、`export`、`and`、`nand`、`or`、`xor`、`nor`、`xnor`、`not`、`null`、`maybe`、`true`、`false`、`arena`、`to`、`extern`、`as`
 - **型名:** `bool`、`8`、`32`、`64`、`decnum`、`string`、`pointer`、`array`、`address`
 - **`:`と`=`:** 別々のトークンとして扱う
 
@@ -91,6 +91,7 @@ enum Type {
     Pointer(Box<Type>),
     Array(Box<Type>),
     Struct(String, Vec<Type>),
+    Enum(String),
     Function(Box<Type>, Vec<Type>),
     Param(String),
     Address,
@@ -285,6 +286,8 @@ if (x > 10) {
 
 繰り返しは`while`だけで、`for`はありません。回数を決めた繰り返しも、途中で抜ける繰り返しも、`while`と`if`・`break`で書けるためです。
 
+列挙型の値を種類ごとに分けて処理する`match`もあります（「列挙型」の節）。
+
 ### 演算子
 
 算術演算子は`+`、`-`、`*`、`/`、`%`（余り）、`^`（累乗、右結合）、比較演算子は`<`、`>`、`<=`、`>=`、`==`、`!=`です。
@@ -362,6 +365,97 @@ r.x = 7;            // p.x は 5 のまま
 - **`size(:Point)`:** 変数や`pointer:Point`の要素に入るのはアドレスなので、8を返す
 - **配列:** `array:Point`は`array(n)`では作れない（要素の初期値がないため）。`array(n, Point(0, 0))`のように初期値を渡すか、`array:maybe:Point`にするか、`[Point(…), …]`で作る
 - **表示:** `stdio.print(p)`は`Point(x: 1, y: 2)`のように表示する。自分自身を指す構造体でも止まるよう、深さ20より先は`…`にする
+
+### 列挙型
+
+列挙型は`enum`で定義します。値は、並べた種類のうちのどれか1つです。種類ごとに、違う中身を持てます。
+
+```
+enum Shape {
+    Circle(r:decnum);
+    Rect(w:decnum, h:decnum);
+    Empty;
+}
+
+a:Shape = Shape.Circle(1.5);
+b:Shape = Shape.Empty;
+```
+
+値は`型の名前.種類(中身, ...)`で作ります。中身のない種類は、`( )`を付けずに`Shape.Empty`と書きます。
+
+種類を調べるには`match`を使います。調べる値がローカル変数（か引数）なら、種類を1つだけ書いた`{ }`の中で、その中身を`.`で使えます。
+
+```
+function decnum area(s:Shape) {
+    match (s) {
+        Circle {
+            return 3.14 * s.r * s.r;
+        }
+        Rect {
+            return s.w * s.h;
+        }
+        Empty {
+            return 0.0;
+        }
+    }
+}
+```
+
+中身に自分と同じ列挙型を書けば、木やリストになります。
+
+```
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function 64 eval(e:Expr) {
+    match (e) {
+        Num {
+            return e.value;
+        }
+        Add {
+            return eval(e.left) + eval(e.right);
+        }
+        Neg {
+            return -eval(e.inner);
+        }
+    }
+}
+
+x:Expr = Expr.Add(Expr.Num(1), Expr.Neg(Expr.Num(2)));
+stdio.print(eval(x));   // -1
+```
+
+`match`の決まりは次のとおりです。
+
+- **書き方:** `match (値) { 種類 { ... } 種類 { ... } }`。調べる値は`()`で囲む。種類は名前だけを書く（`Shape.`は付けない）
+- **すべての種類を書く:** 書いていない種類があるとコンパイルエラー。種類を足したときに、直し忘れた`match`がわかる
+- **`else`:** 残りの種類をまとめて受けるなら、最後に`else { ... }`を書く
+- **種類を並べる:** `Circle, Rect { ... }`のように`,`で並べると、どちらの種類でもその`{ }`に入る。この中と`else`の中では、中身は使えない（どの種類かが決まらないため）
+- **中身を使える場所:** 種類を1つだけ書いた`{ }`の中。ほかの種類のときに`return`などで抜けていれば、`match`の後ろでも使える（`maybe`を`if (x == null) { return; }`で確かめるのと同じ）
+- **確かめられるもの:** ローカル変数と引数だけ。フィールド・配列の要素・グローバル変数・関数の戻り値は、`match`で調べることはできるが、中身を使うなら、いったんローカル変数に入れてから調べる
+- **代入したあと:** 調べた変数に別の値を代入すると、種類はもうわからない。中身を使うなら、もう一度`match`で調べる（リストをたどる`while`の中で`cur = cur.tail;`と進めて、次の周でまた`match`する書き方ができる）
+- **値を返す関数:** すべての枝（と`else`）が`return`していれば、`match`の後ろに`return`は要らない
+- **`maybe`:** `maybe:Shape`の値は、nullでないことを確かめてから`match`で調べる
+
+列挙型の値の決まりは次のとおりです。
+
+- **値:** 構造体と同じくアドレスを持つ。`Shape.Circle(1.5)`はメモリを確保して、先頭の8バイトに種類の番号、その後ろに中身を置く。関数には1ワードで渡せる
+- **中身のない種類:** メモリを確保しない。プログラムの中に1つだけ置いたものを指す
+- **`==`と`!=`:** 構造体と同じく、同じものを指しているかを比べる。中身のない種類は1つしかないので、`c == Color.Red`のように種類を比べられる。中身のある種類は、中身が同じでも別々に作れば等しくならないので、種類は`match`で調べる
+- **中身の書き換え:** `match`で種類を確かめた`{ }`の中では、`s.r = 2.0;`のように中身を書き換えられる。種類そのものは変えられない
+- **自分自身を含む種類:** `Add(left:Expr, right:Expr)`のように、`maybe`なしで書ける（中身のない種類や、自分を含まない種類から作り始められるため）。どの種類も`maybe`なしで自分自身を含む（構造体を通しても）と、最初の1つを作れないのでコンパイルエラー
+- **並べ方:** 中身は、種類の番号（8バイト）の後ろに、構造体と同じ並べ方で置く
+- **`size(:Shape)`:** アドレスの大きさなので、8を返す
+- **配列:** `array:Shape`は`array(n)`では作れない（要素の初期値がないため）。`array(n, Shape.Empty)`のように初期値を渡すか、`array:maybe:Shape`にするか、`[Shape.Empty, …]`で作る
+- **表示:** `stdio.print(a)`は`Circle(r: 1.5)`、中身のない種類は`Empty`のように表示する
+- **arena:** arenaの中で作った値は、構造体と同じく外へ持ち出せない。中身のない種類は確保しないので、どこにでも入れられる
+- **import:** ほかのファイルの列挙型は、`export enum`としたものを`shapes.Shape.Circle(1.5)`、型は`shapes.Shape`のように使う。`match`の中の種類の名前には何も付けない
+- **グローバル変数:** `immutable`の初期値にも書ける（`immutable ORIGIN:Shape = Shape.Empty;`）
+- **できないこと:** ジェネリクスの列挙型（`enum Option:T`）は、まだ書けない。`copy`、`to:string`、`extern`の関数の引数・戻り値にも使えない
+- **名前:** 種類の名前は、ほかの列挙型の種類や、関数・変数の名前と同じでもよい（いつも`型の名前.種類`か、`match`の中に書くため）
 
 ### 関数ポインタ
 
@@ -474,7 +568,7 @@ function nothing main() {
 
 ### ヘッダーファイル（.orh）とextern
 
-`.orh`は、ライブラリを作る人向けの、宣言だけを書くファイルです。標準ライブラリを使うだけなら意識する必要はありません。書けるのは`extern`の付いた関数、`struct`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
+`.orh`は、ライブラリを作る人向けの、宣言だけを書くファイルです。標準ライブラリを使うだけなら意識する必要はありません。書けるのは`extern`の付いた関数、`struct`、`enum`、`immutable`だけです。`extern`は「中身はCやランタイムの側にある」という印で、OSやCのライブラリを呼ぶときに使います。
 
 - **`import "socket.orh";`:** `.orh`の中のものは、すべて`export`したものとみなす。名前空間は拡張子を除いたファイル名
 - **`.orz`の中:** `extern`の関数は`.orz`にも書ける（`export`を付けなければ、そのファイルの中だけで使える）
@@ -858,6 +952,7 @@ function nothing main() {
 - **文の途中の改行:** 詰める。行末のコメント（`//`）があればそこで改行し、続きを1段深く字下げする
 - **コメント:** すべて残す。文の後ろのコメントの前の空白は元のまま（そろえて書いたコメントがずれないように）
 - **空白:** `a + b`、`f(x, y)`、`x:32`、`p.x`、`a[i]`、`-x`、`if (…)`、`not (…)`
+- **`match`:** 種類ごとの`{ }`は、それぞれ新しい行から書く（`else`も、前の`}`の後ろにつなげない）
 
 ## サンプルと初期実装の目標
 
