@@ -1445,6 +1445,8 @@ struct FnLower<'c, 'p> {
     narrowed: HashSet<u32>,
     /// 今の場所で、`match` によって種類のわかっている列挙型の変数と、その種類の番号。
     variants: HashMap<u32, usize>,
+    /// 種類がわかっていたのに、代入でわからなくなった変数（エラーメッセージ用）。
+    reassigned: HashSet<u32>,
     /// 今の場所に来ることがあるか（`return` の後ろなどは来ない）。
     reachable: bool,
     /// グローバル変数の初期値で、main の前に実行する必要がある（配列や構造体を作る）か。
@@ -1785,6 +1787,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             declared_somewhere: HashSet::new(),
             narrowed: HashSet::new(),
             variants: HashMap::new(),
+            reassigned: HashSet::new(),
             reachable: true,
             needs_init: false,
             arena_depth: 0,
@@ -2222,7 +2225,9 @@ impl<'c, 'p> FnLower<'c, 'p> {
         if let Some(var) = local {
             self.after_store(var, &ty, &vt);
             // 別の値が入ったので、`match` で確かめた種類はもうわからない。
-            self.variants.remove(&var);
+            if self.variants.remove(&var).is_some() {
+                self.reassigned.insert(var);
+            }
         }
         Ok(())
     }
@@ -2527,11 +2532,20 @@ impl<'c, 'p> FnLower<'c, 'p> {
     ) -> Result<(Operand, Ty, Vec<u32>), Diag> {
         let ename = self.ctx.enums[ei].name.clone();
         let Some(k) = self.known_variant(obj) else {
-            return Err(Diag::new(
+            let d = Diag::new(
                 e.span,
                 format!("列挙型 `{}` の中身は、`match` で種類を確かめてから使います", ename),
-            )
-            .hint(MATCH_HINT));
+            );
+            // 確かめたあとで、別の値を代入した変数。
+            if let ExprKind::Var(name) = &obj.kind {
+                if self.lookup(name).is_some_and(|l| self.reassigned.contains(&l.var)) {
+                    return Err(d.hint(format!(
+                        "`{}` には別の値を代入しているので、種類はもうわかりません。代入したあとで使うなら、もう一度 `match` で調べます",
+                        name
+                    )));
+                }
+            }
+            return Err(d.hint(MATCH_HINT));
         };
         let variant = &self.ctx.enums[ei].variants[k];
         let Some(j) = variant.fields.iter().position(|f| f.name == field) else {
@@ -2576,6 +2590,11 @@ impl<'c, 'p> FnLower<'c, 'p> {
             .filter(|(var, _)| !assigned_vars.contains(var))
             .map(|(var, k)| (*var, *k))
             .collect();
+        for var in self.variants.keys() {
+            if assigned_vars.contains(var) {
+                self.reassigned.insert(*var);
+            }
+        }
         let entry_reachable = self.reachable;
         let (true_facts, false_facts) = self.cond_facts(cond);
 

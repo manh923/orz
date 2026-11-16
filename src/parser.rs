@@ -151,6 +151,15 @@ impl Parser {
                     Diag::new(self.span(), "`}` が足りません").hint("列挙型を `}` で閉じ忘れていませんか")
                 );
             }
+            // 次の定義が始まっていたら、`}` の書き忘れ。
+            if matches!(
+                self.peek(),
+                Tok::Kw(Kw::Function | Kw::Struct | Kw::Enum | Kw::Import | Kw::Export | Kw::Extern)
+            ) {
+                return Err(
+                    Diag::new(self.span(), "`}` が足りません").hint("列挙型を `}` で閉じ忘れていませんか")
+                );
+            }
             let (vname, vspan) = self.ident("種類の名前")?;
             let mut fields = Vec::new();
             if self.eat(&Tok::LParen) {
@@ -179,6 +188,10 @@ impl Parser {
                     self.expect(Tok::RParen, "中身の終わりの")?;
                     break;
                 }
+            }
+            if self.peek() == &Tok::Comma {
+                return Err(Diag::new(self.span(), "種類は `,` ではなく `;` で区切ります")
+                    .hint("例：enum Color { Red; Green; Blue; }"));
             }
             self.semi()?;
             variants.push(VariantDef {
@@ -570,7 +583,13 @@ impl Parser {
             }
             Tok::Kw(Kw::Match) => {
                 self.bump();
-                let value = self.cond("match")?;
+                if self.peek() != &Tok::LParen {
+                    return Err(Diag::new(self.span(), "`match` で調べる値は `( )` で囲みます")
+                        .hint("例：match (shape) { Circle { ... } else { ... } }"));
+                }
+                self.bump();
+                let value = self.expr()?;
+                self.expect(Tok::RParen, "調べる値の終わりの")?;
                 self.expect(Tok::LBrace, "`match` の始まりの")?;
                 let mut arms = Vec::new();
                 let mut els = None;
@@ -596,6 +615,16 @@ impl Parser {
                             while self.eat(&Tok::Comma) {
                                 names.push(self.ident("種類の名前")?);
                             }
+                            if self.peek() != &Tok::LBrace {
+                                return Err(Diag::new(
+                                    self.span(),
+                                    format!(
+                                        "種類の名前の後ろには `{{` を書きますが、{}があります",
+                                        self.peek().describe()
+                                    ),
+                                )
+                                .hint("例：match (e) { Num { ... } Add, Sub { ... } else { ... } }。中身は、`{ }` の中で `e.value` のように使います"));
+                            }
                             let body = self.block()?;
                             arms.push(MatchArm { names, body });
                         }
@@ -607,6 +636,14 @@ impl Parser {
             Tok::Kw(Kw::Function) => {
                 return Err(Diag::new(lo, "関数の中に関数は書けません")
                     .hint("関数はファイルのいちばん外側に書きます"))
+            }
+            Tok::Kw(k @ (Kw::Struct | Kw::Enum)) => {
+                return Err(
+                    Diag::new(lo, format!("関数の中に `{}` は書けません", k.as_str())).hint(format!(
+                        "{}はファイルのいちばん外側に書きます",
+                        if *k == Kw::Struct { "構造体" } else { "列挙型" }
+                    )),
+                )
             }
             _ => {
                 let e = self.expr()?;
