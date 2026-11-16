@@ -44,11 +44,12 @@ function nothing main() {
 }
 ```
 
-- 型：`8`・`32`・`64`、`bool`、`decnum`、`string`、`array`、`pointer`、`address`、構造体、`maybe`
+- 型：`8`・`32`・`64`、`bool`、`decnum`、`string`、`array`、`pointer`、`address`、構造体、列挙型、`maybe`
 - 変数（ブロック単位のスコープ）、`if`・`else if`・`else`、`while`・`break`・`continue`
 - 関数（再帰、定義より前からの呼び出し、7 個以上の引数）、`main(args:array:string)`
 - グローバル変数と `immutable`
 - 構造体（`Point(1, 2)`、`p.x`、`copy`）、文字列の `+`・`==`、配列（範囲チェックあり）、`allocate`・`size`・`bytes`・`to:型(x)`
+- 列挙型（`enum`）と `match`：種類ごとに中身の違う値。`match` に書き忘れた種類があるとコンパイルエラー。種類を確かめた `{ }` の中で、その中身（`e.value`）を使える（下の例）
 - `import stdio;` の `print`・`put`・`read_line`・`read_file`・`write_file`・`last_error`
 - `import bignum;`：大きな整数（`bignum.from`・`parse`・`add`・`sub`・`mul`・`div`・`mod`・`pow`・`compare`・`print` など）。orz で書いてある（[lib/bignum.orz](lib/bignum.orz)）
 - `import strings;`・`lists;`・`maps;`・`os;`：文字列（切り出し・検索・分割・`Builder`）、長さの変わる配列、文字列をキーにした表、コマンドの実行・環境変数など。どれも orz で書いてある（[lib/](lib/)）
@@ -68,6 +69,36 @@ function nothing main() {
 
 - 整形ツール（`orz fmt`）：`;`・`{`・`}` で改行と字下げを決め、コメントと空行（1 行まで）を残す
 
+
+```
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function 64 eval(e:Expr) {
+    match (e) {
+        Num {
+            return e.value;
+        }
+        Add {
+            return eval(e.left) + eval(e.right);
+        }
+        Neg {
+            return -eval(e.inner);
+        }
+    }
+}
+
+function nothing main() {
+    x:Expr = Expr.Add(Expr.Num(1), Expr.Neg(Expr.Num(2)));
+    stdio.print(eval(x));            // -1
+    stdio.print(x);                  // Add(left: Num(value: 1), right: Neg(inner: Num(value: 2)))
+}
+```
 
 ```
 import bignum;
