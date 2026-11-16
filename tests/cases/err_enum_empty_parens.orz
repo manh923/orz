@@ -1,0 +1,8 @@
+// error: 中身のない種類には、`( )` を書きません
+enum Color {
+    Red();
+    Green;
+}
+
+function nothing main() {
+}

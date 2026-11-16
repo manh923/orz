@@ -1,0 +1,20 @@
+// error: 種類 `Red` が 2 回書かれています
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    match (c) {
+        Red, Green {
+        }
+        Red {
+        }
+        Blue {
+        }
+    }
+}

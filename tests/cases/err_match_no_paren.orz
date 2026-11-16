@@ -1,0 +1,18 @@
+// error: `match` で調べる値は `( )` で囲みます
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    match c {
+        Red {
+        }
+        else {
+        }
+    }
+}

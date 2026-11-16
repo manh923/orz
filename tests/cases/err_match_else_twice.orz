@@ -1,0 +1,20 @@
+// error: `match` の中に `else` が 2 つあります
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    match (c) {
+        Red {
+        }
+        else {
+        }
+        else {
+        }
+    }
+}

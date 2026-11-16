@@ -1,0 +1,18 @@
+// error: arena の中で作った値を return しています
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function Expr f() {
+    arena {
+        return Expr.Num(1);
+    }
+}
+
+function nothing main() {
+    stdio.print(f());
+}

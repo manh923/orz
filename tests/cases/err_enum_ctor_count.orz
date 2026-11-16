@@ -1,0 +1,13 @@
+// error: `Expr.Add` の中身は 2 個ですが、1 個書かれています
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function nothing main() {
+    e:Expr = Expr.Add(Expr.Num(1));
+    stdio.print(e);
+}

@@ -1,0 +1,10 @@
+// error: `extern` の関数には `Color` 型は使えません
+enum Color {
+    Red;
+    Green;
+}
+
+extern function 32 paint(c:Color);
+
+function nothing main() {
+}

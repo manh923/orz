@@ -1,0 +1,24 @@
+// error: 列挙型 `Expr` の中身は、`match` で種類を確かめてから使います
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+// 種類をいくつか並べた枝の中では、中身は使えない。
+function 64 f(e:Expr) {
+    match (e) {
+        Add, Neg {
+            return eval(e.inner);
+        }
+        Num {
+            return e.value;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Expr.Num(1)));
+}

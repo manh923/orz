@@ -1,0 +1,27 @@
+// error: 列挙型 `Expr` の中身は、`match` で種類を確かめてから使います
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+// ループの中で代入する変数は、ループの先頭では種類がわからない。
+function 64 f(e:Expr, other:Expr) {
+    match (e) {
+        Num {
+            while (e.value > 0) {
+                e = other;
+            }
+            return 1;
+        }
+        else {
+            return 0;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Expr.Num(1), Expr.Neg(Expr.Num(2))));
+}

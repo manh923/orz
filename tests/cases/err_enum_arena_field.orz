@@ -1,0 +1,22 @@
+// error: arena の中で作った値を、arena の外で作ったもの（構造体・配列など）の中に入れています
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function nothing main() {
+    outer:Expr = Expr.Neg(Expr.Num(0));
+    match (outer) {
+        Neg {
+            arena {
+                outer.inner = Expr.Num(1);
+            }
+        }
+        else {
+        }
+    }
+    stdio.print(outer);
+}

@@ -1,0 +1,13 @@
+// error: `array:Color` は `array(n)` では作れません
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    a:array:Color = array(3);
+    stdio.print(a);
+}

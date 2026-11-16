@@ -1,0 +1,13 @@
+// error: `<` で大小を比べられるのは数だけですが、この式は `Color` 型です
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    stdio.print(c < Color.Blue);
+}

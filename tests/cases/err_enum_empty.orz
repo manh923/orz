@@ -1,0 +1,6 @@
+// error: 列挙型 `Nothing` に、種類が 1 つもありません
+enum Nothing {
+}
+
+function nothing main() {
+}

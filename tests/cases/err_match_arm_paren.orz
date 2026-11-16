@@ -1,0 +1,23 @@
+// error: 種類の名前の後ろには `{` を書きますが、`(`があります
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function 64 f(e:Expr) {
+    match (e) {
+        Num(v) {
+            return v;
+        }
+        else {
+            return 0;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Expr.Num(1)));
+}

@@ -1,0 +1,13 @@
+// error: `Color.Red` には中身がないので、`( )` を付けずに `Color.Red` と書きます
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red();
+    stdio.print(c);
+}

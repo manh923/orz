@@ -1,0 +1,9 @@
+// error: 種類は `,` ではなく `;` で区切ります
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+function nothing main() {
+}

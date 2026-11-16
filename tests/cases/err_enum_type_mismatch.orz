@@ -1,0 +1,18 @@
+// error: `Color` 型の値が必要ですが、この式は `Expr` 型です
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+enum Color {
+    Red;
+    Green;
+}
+
+function nothing main() {
+    c:Color = Expr.Num(1);
+    stdio.print(c);
+}

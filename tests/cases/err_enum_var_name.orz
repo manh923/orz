@@ -1,0 +1,13 @@
+// error: `Color` は列挙型の名前なので、変数の名前には使えません
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    Color:32 = 3;
+    stdio.print(Color);
+}

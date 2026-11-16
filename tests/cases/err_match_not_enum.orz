@@ -1,0 +1,18 @@
+// error: `match` で調べられるのは列挙型の値だけですが、この式は `32` 型です
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    n:32 = 3;
+    match (n) {
+        Red {
+        }
+        else {
+        }
+    }
+}

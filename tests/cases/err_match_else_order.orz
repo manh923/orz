@@ -1,0 +1,18 @@
+// error: `else` は、`match` の最後に書きます
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    match (c) {
+        else {
+        }
+        Red {
+        }
+    }
+}

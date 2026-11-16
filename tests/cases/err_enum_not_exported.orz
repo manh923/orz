@@ -1,0 +1,8 @@
+// error: `figures` の `Hidden` は export されていません
+import stdio;
+import "modules/figures.orz";
+
+function nothing main() {
+    h:figures.Hidden = figures.Hidden.Only;
+    stdio.print(h);
+}

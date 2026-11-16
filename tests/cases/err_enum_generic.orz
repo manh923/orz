@@ -1,0 +1,8 @@
+// error: ジェネリクスの `enum` は、まだ書けません
+enum Option:T {
+    Some(value:T);
+    None;
+}
+
+function nothing main() {
+}

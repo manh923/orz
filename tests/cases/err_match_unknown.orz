@@ -1,0 +1,20 @@
+// error: 列挙型 `Color` に `Pink` という種類はありません
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color.Red;
+    match (c) {
+        Red {
+        }
+        Pink {
+        }
+        else {
+        }
+    }
+}

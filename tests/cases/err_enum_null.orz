@@ -1,0 +1,13 @@
+// error: `Color` 型の値が必要ですが、この式は `null` 型です
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = null;
+    stdio.print(c);
+}

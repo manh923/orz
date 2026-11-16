@@ -1,0 +1,7 @@
+// error: 中身 `x` が 2 つあります
+enum Point {
+    At(x:32, x:32);
+}
+
+function nothing main() {
+}

@@ -1,0 +1,11 @@
+// error: 列挙型 `Body` は、どの種類も maybe を付けずに自分自身を含んでいます
+struct Wrap {
+    body:Body;
+}
+
+enum Body {
+    Only(wrap:Wrap);
+}
+
+function nothing main() {
+}

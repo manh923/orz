@@ -1,0 +1,18 @@
+// error: `maybe:Color` 型の値は、null でないことを確かめてから `match` で調べます
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:maybe:Color = null;
+    match (c) {
+        Red {
+        }
+        else {
+        }
+    }
+}

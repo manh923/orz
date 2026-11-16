@@ -1,0 +1,24 @@
+// error: `e` には別の値を代入しているので、種類はもうわかりません
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function 64 f(e:Expr) {
+    match (e) {
+        Neg {
+            e = e.inner;
+            return e.value;
+        }
+        else {
+            return 0;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Expr.Neg(Expr.Num(1))));
+}

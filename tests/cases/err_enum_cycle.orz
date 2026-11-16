@@ -1,0 +1,9 @@
+// error: 列挙型 `Chain` は、どの種類も maybe を付けずに自分自身を含んでいます
+// どの種類も自分自身を含むと、最初の 1 つを作れない。
+enum Chain {
+    Link(next:Chain);
+    Pair(a:Chain, b:32);
+}
+
+function nothing main() {
+}

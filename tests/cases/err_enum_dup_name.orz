@@ -1,0 +1,11 @@
+// error: `Color` という名前が 2 回定義されています
+enum Color {
+    Red;
+}
+
+struct Color {
+    r:32;
+}
+
+function nothing main() {
+}

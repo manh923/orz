@@ -1,0 +1,25 @@
+// error: 関数 `f` が値を返さずに終わることがあります
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function 32 f(c:Color) {
+    match (c) {
+        Red {
+            return 1;
+        }
+        Green {
+        }
+        Blue {
+            return 3;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Color.Red));
+}

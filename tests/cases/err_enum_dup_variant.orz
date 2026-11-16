@@ -1,0 +1,9 @@
+// error: 種類 `Red` が 2 つあります
+enum Color {
+    Red;
+    Green;
+    Red;
+}
+
+function nothing main() {
+}

@@ -1,0 +1,23 @@
+// error: `match` に、種類 `Neg` がありません
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function 64 eval(e:Expr) {
+    match (e) {
+        Num {
+            return e.value;
+        }
+        Add {
+            return eval(e.left) + eval(e.right);
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(eval(Expr.Num(1)));
+}

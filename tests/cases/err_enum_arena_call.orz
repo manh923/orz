@@ -1,0 +1,26 @@
+// error: 関数 `put` に渡した 2 番目の引数（arena の中で作った値）が、1 番目の引数（それより外で作ったもの）の中に入れられます
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function nothing put(o:Expr, v:Expr) {
+    match (o) {
+        Neg {
+            o.inner = v;
+        }
+        else {
+        }
+    }
+}
+
+function nothing main() {
+    outer:Expr = Expr.Neg(Expr.Num(0));
+    arena {
+        put(outer, Expr.Num(1));
+    }
+    stdio.print(outer);
+}

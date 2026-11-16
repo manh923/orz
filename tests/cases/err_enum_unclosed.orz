@@ -1,0 +1,7 @@
+// error: `}` が足りません
+enum Color {
+    Red;
+    Green;
+
+function nothing main() {
+}

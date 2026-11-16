@@ -1,0 +1,6 @@
+// error: 関数の中に `enum` は書けません
+function nothing main() {
+    enum Color {
+        Red;
+    }
+}

@@ -1,0 +1,13 @@
+// error: `Color` は列挙型です。値は `Color.種類(…)` のように、種類を書いて作ります
+import stdio;
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function nothing main() {
+    c:Color = Color(1);
+    stdio.print(c);
+}

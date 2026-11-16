@@ -1,0 +1,23 @@
+// error: `Expr.Num` に `left` という中身はありません
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function Expr f(e:Expr) {
+    match (e) {
+        Num {
+            return e.left;
+        }
+        else {
+            return e;
+        }
+    }
+}
+
+function nothing main() {
+    stdio.print(f(Expr.Num(1)));
+}

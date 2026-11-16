@@ -1,0 +1,13 @@
+// error: `Expr.Num` には中身があるので、`Expr.Num(…)` のように値を渡します
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function nothing main() {
+    e:Expr = Expr.Num;
+    stdio.print(e);
+}

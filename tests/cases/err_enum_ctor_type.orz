@@ -1,0 +1,13 @@
+// error: `64` 型の値が必要ですが、この式は `string` 型です
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+function nothing main() {
+    e:Expr = Expr.Num("1");
+    stdio.print(e);
+}
