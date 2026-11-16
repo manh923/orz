@@ -1,0 +1,20 @@
+Cons(head: 1, tail: Cons(head: 2, tail: Cons(head: 3, tail: Cons(head: 4, tail: Cons(head: 5, tail: Nil)))))
+15
+5
+0
+2
+-1
+-2
+12.0
+10.0
+0.0
+7.5
+-1.0
+Rect(w: 3.0, h: 4.0)
+1.0
+形がある
+空
+いつも
+null
+0.5
+Holder(shape: Circle(r: 1.0), seq: Cons(head: 7, tail: Cons(head: 8, tail: Nil)))

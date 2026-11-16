@@ -1,0 +1,45 @@
+// exit: 0
+// ほかのファイルの列挙型（export したもの）と、.orh に書いた列挙型。
+import stdio;
+import "modules/figures.orz";
+import "modules/levels.orh";
+
+function string kind(f:figures.Figure) {
+    match (f) {
+        Circle {
+            return "円 " + to:string(f.r);
+        }
+        Square {
+            return "四角 " + to:string(f.side);
+        }
+        Dot {
+            return "点";
+        }
+    }
+}
+
+function nothing main() {
+    a:figures.Figure = figures.Figure.Circle(1.5);
+    b:figures.Figure = figures.Figure.Dot;
+    stdio.print(kind(a));
+    stdio.print(kind(figures.bigger(a)));
+    stdio.print(kind(b));
+    stdio.print(figures.area(figures.bigger(figures.Figure.Square(2.0))));
+    stdio.print(b == figures.DEFAULT);
+    stdio.print(b == figures.Figure.Dot);
+    stdio.print(a == figures.Figure.Dot);
+    all:array:figures.Figure = [a, b, figures.Figure.Square(3.0)];
+    stdio.print(all);
+
+    l:levels.Level = levels.Level.High(3);
+    stdio.print(l);
+    stdio.print(levels.Level.Low);
+    match (l) {
+        High {
+            stdio.print(l.n);
+        }
+        Low {
+            stdio.print("低い");
+        }
+    }
+}

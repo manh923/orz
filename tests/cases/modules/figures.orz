@@ -1,0 +1,40 @@
+export enum Figure {
+    Circle(r:decnum);
+    Square(side:decnum);
+    Dot;
+}
+
+// export していない列挙型は、ほかのファイルからは使えない。
+enum Hidden {
+    Only;
+}
+
+export immutable DEFAULT:Figure = Figure.Dot;
+
+export function decnum area(f:Figure) {
+    match (f) {
+        Circle {
+            return 3.0 * f.r * f.r;
+        }
+        Square {
+            return f.side * f.side;
+        }
+        Dot {
+            return 0.0;
+        }
+    }
+}
+
+export function Figure bigger(f:Figure) {
+    match (f) {
+        Circle {
+            return Figure.Circle(f.r * 2.0);
+        }
+        Square {
+            return Figure.Square(f.side * 2.0);
+        }
+        Dot {
+            return f;
+        }
+    }
+}

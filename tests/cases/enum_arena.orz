@@ -1,0 +1,98 @@
+// exit: 0
+// arena の中で列挙型の値を作る。中身のない種類は、arena の外にも入れられる。
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Nil;
+}
+
+enum Color {
+    Red;
+    Green;
+}
+
+function Expr make(n:64) {
+    return Expr.Add(Expr.Num(n), Expr.Nil);
+}
+
+function 64 eval(e:Expr) {
+    match (e) {
+        Num {
+            return e.value;
+        }
+        Add {
+            return eval(e.left) + eval(e.right);
+        }
+        Nil {
+            return 0;
+        }
+    }
+}
+
+function nothing put(o:Expr, v:Expr) {
+    match (o) {
+        Add {
+            o.right = v;
+        }
+        else {
+        }
+    }
+}
+
+// arena の中から return する。
+function 64 first(e:Expr) {
+    arena {
+        match (e) {
+            Num {
+                return e.value;
+            }
+            else {
+            }
+        }
+        wrapped:Expr = Expr.Add(e, Expr.Num(100));
+        return eval(wrapped);
+    }
+}
+
+function nothing main() {
+    total:64 = 0;
+    c:Color = Color.Red;
+    keep:Expr = Expr.Nil;
+    i:64 = 0;
+    while (i < 100000) {
+        arena {
+            e:Expr = Expr.Add(make(i), Expr.Num(1));
+            total = total + eval(e);
+            c = Color.Green;
+            keep = Expr.Nil;
+            match (e) {
+                Add {
+                    e.left = Expr.Num(7);
+                    total = total + eval(e.left);
+                }
+                else {
+                }
+            }
+        }
+        i = i + 1;
+    }
+    stdio.print(total);
+    stdio.print(c);
+    stdio.print(keep);
+
+    outer:Expr = Expr.Add(Expr.Nil, Expr.Nil);
+    inner:Expr = Expr.Num(5);
+    arena {
+        // 外で作ったものどうしは、arena の中でもつなげる。
+        put(outer, inner);
+        t:Expr = make(1);
+        put(t, Expr.Num(2));
+        put(t, inner);
+        stdio.print(eval(t));
+    }
+    stdio.print(outer);
+    stdio.print(first(Expr.Num(3)));
+    stdio.print(first(make(4)));
+}

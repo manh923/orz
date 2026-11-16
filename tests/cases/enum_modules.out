@@ -1,0 +1,11 @@
+円 1.5
+円 3.0
+点
+16.0
+true
+true
+false
+[Circle(r: 1.5), Dot, Square(side: 3.0)]
+High(n: 3)
+Low
+3

@@ -1,0 +1,23 @@
+A true 200 -5 5000000000 1.5 あ
+A true 200 -4 5000000000 1.5 あ!
+B [1, 2, 3] A(flag: true, small: 200, n: -3, big: 5000000000, d: 1.5, s: "あ!!")
+B [] null
+C
+0.0
+3.0
+4.0
+true
+Circle(r: 1.0)
+Pair(first: Circle(r: 2.0), second: Dot)
+12.0
+Pair(first: Circle(r: 2.0), second: Circle(r: 2.0))
+Pair(first: Dot, second: Circle(r: 2.0))
+12.0
+[Circle(r: 1.0), Dot, Square(side: 3.0)]
+Circle(r: 9.0)
+null
+[Dot, Square(side: 1.5), Dot]
+[[Dot], [], [Circle(r: 0.5), Dot]]
+点
+2
+16.0

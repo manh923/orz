@@ -1,0 +1,108 @@
+// exit: 0
+// 列挙型：種類ごとに中身の違う値。match で種類を調べると、その中で中身を使える。
+import stdio;
+
+enum Expr {
+    Num(value:64);
+    Add(left:Expr, right:Expr);
+    Mul(left:Expr, right:Expr);
+    Neg(inner:Expr);
+}
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+function 64 eval(e:Expr) {
+    match (e) {
+        Num {
+            return e.value;
+        }
+        Add {
+            return eval(e.left) + eval(e.right);
+        }
+        Mul {
+            return eval(e.left) * eval(e.right);
+        }
+        Neg {
+            return -eval(e.inner);
+        }
+    }
+}
+
+function string show(e:Expr) {
+    match (e) {
+        Num {
+            return to:string(e.value);
+        }
+        Add {
+            return "(" + show(e.left) + " + " + show(e.right) + ")";
+        }
+        Mul {
+            return show(e.left) + " * " + show(e.right);
+        }
+        Neg {
+            return "-" + show(e.inner);
+        }
+    }
+}
+
+// いくつかの種類をまとめて受ける。残りは else。
+function string warmth(c:Color) {
+    match (c) {
+        Red {
+            return "暖かい";
+        }
+        Green, Blue {
+            return "冷たい";
+        }
+    }
+}
+
+function bool is_red(c:Color) {
+    match (c) {
+        Red {
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+}
+
+function nothing main() {
+    x:Expr = Expr.Add(Expr.Num(1), Expr.Mul(Expr.Num(2), Expr.Neg(Expr.Num(3))));
+    stdio.print(eval(x));
+    stdio.print(show(x));
+    stdio.print(x);
+
+    c:Color = Color.Green;
+    stdio.print(c);
+    stdio.print(warmth(c));
+    stdio.print(warmth(Color.Red));
+    stdio.print(is_red(c));
+    stdio.print(is_red(Color.Red));
+    // 中身のない種類は == で比べられる
+    stdio.print(c == Color.Green);
+    stdio.print(c == Color.Red);
+    stdio.print(c != Color.Red);
+    c = Color.Blue;
+    stdio.print(c == Color.Blue);
+    stdio.print("{} と {}", Color.Blue, Expr.Num(42));
+    all:array:Color = [Color.Red, Color.Green, Color.Blue];
+    stdio.print(all);
+    i:32 = 0;
+    while (i < length(all)) {
+        stdio.put(warmth(all[i]));
+        stdio.put(" ");
+        i = i + 1;
+    }
+    stdio.print("");
+    // 中身のある種類の == は、構造体と同じく「同じものか」
+    y:Expr = x;
+    stdio.print(x == y);
+    stdio.print(Expr.Num(1) == Expr.Num(1));
+    stdio.print(size(:Expr));
+}

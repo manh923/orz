@@ -1,0 +1,18 @@
+-5
+(1 + 2 * -3)
+Add(left: Num(value: 1), right: Mul(left: Num(value: 2), right: Neg(inner: Num(value: 3))))
+Green
+冷たい
+暖かい
+false
+true
+true
+false
+true
+true
+Blue と Num(value: 42)
+[Red, Green, Blue]
+暖かい 冷たい 冷たい 
+true
+false
+8

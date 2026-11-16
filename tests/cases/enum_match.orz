@@ -1,0 +1,194 @@
+// exit: 0
+// match と、種類の絞り込み（代入、ループ、先に return、入れ子、maybe）。
+import stdio;
+
+enum Seq {
+    Nil;
+    Cons(head:32, tail:Seq);
+}
+
+enum Shape {
+    Circle(r:decnum);
+    Rect(w:decnum, h:decnum);
+    Empty;
+}
+
+struct Holder {
+    shape:Shape;
+    seq:maybe:Seq;
+}
+
+function Seq range(from:32, until:32) {
+    if (from >= until) {
+        return Seq.Nil;
+    }
+    return Seq.Cons(from, range(from + 1, until));
+}
+
+// 代入しながらたどる。代入したあとは、次の match でもう一度調べる。
+function 32 sum(s:Seq) {
+    total:32 = 0;
+    cur:Seq = s;
+    while (true) {
+        match (cur) {
+            Nil {
+                break;
+            }
+            Cons {
+                total = total + cur.head;
+                cur = cur.tail;
+            }
+        }
+    }
+    return total;
+}
+
+function 32 count(s:Seq) {
+    n:32 = 0;
+    cur:Seq = s;
+    while (cur != Seq.Nil) {
+        match (cur) {
+            Cons {
+                n = n + 1;
+                cur = cur.tail;
+                continue;
+            }
+            else {
+            }
+        }
+    }
+    return n;
+}
+
+function decnum area(s:Shape) {
+    match (s) {
+        Circle {
+            return 3.0 * s.r * s.r;
+        }
+        Rect {
+            return s.w * s.h;
+        }
+        Empty {
+            return 0.0;
+        }
+    }
+}
+
+// ほかの種類のときに先に return すれば、match の後ろでも種類がわかっている。
+function decnum radius(s:Shape) {
+    match (s) {
+        Circle {
+        }
+        else {
+            return -1.0;
+        }
+    }
+    return s.r;
+}
+
+// 入れ子：中身を変数に入れてから調べる。
+function 32 second(s:Seq) {
+    match (s) {
+        Cons {
+            rest:Seq = s.tail;
+            match (rest) {
+                Cons {
+                    return rest.head;
+                }
+                Nil {
+                    return -1;
+                }
+            }
+        }
+        Nil {
+            return -2;
+        }
+    }
+}
+
+// 中身は書き換えられる。
+function nothing grow(s:Shape) {
+    match (s) {
+        Circle {
+            s.r = s.r * 2.0;
+        }
+        Rect {
+            s.w = s.w + 1.0;
+            s.h = s.h + 1.0;
+        }
+        Empty {
+        }
+    }
+}
+
+function nothing main() {
+    s:Seq = range(1, 6);
+    stdio.print(s);
+    stdio.print(sum(s));
+    stdio.print(count(s));
+    stdio.print(count(Seq.Nil));
+    stdio.print(second(s));
+    stdio.print(second(range(0, 1)));
+    stdio.print(second(Seq.Nil));
+
+    stdio.print(area(Shape.Circle(2.0)));
+    stdio.print(area(Shape.Rect(2.0, 5.0)));
+    stdio.print(area(Shape.Empty));
+    stdio.print(radius(Shape.Circle(7.5)));
+    stdio.print(radius(Shape.Empty));
+    box:Shape = Shape.Rect(1.0, 2.0);
+    grow(box);
+    grow(box);
+    stdio.print(box);
+
+    // フィールドは、ローカル変数に入れてから調べる。
+    h:Holder = Holder(Shape.Circle(1.0), null);
+    inside:Shape = h.shape;
+    match (inside) {
+        Circle {
+            stdio.print(inside.r);
+        }
+        else {
+            stdio.print("円ではない");
+        }
+    }
+    // 変数でない値も調べられる（中身は使えない）。
+    match (h.shape) {
+        Circle, Rect {
+            stdio.print("形がある");
+        }
+        Empty {
+            stdio.print("形がない");
+        }
+    }
+    match (range(0, 0)) {
+        Nil {
+            stdio.print("空");
+        }
+        Cons {
+            stdio.print("空ではない");
+        }
+    }
+    // else だけ
+    match (inside) {
+        else {
+            stdio.print("いつも");
+        }
+    }
+
+    // maybe は、null でないことを確かめてから。
+    m:maybe:Shape = null;
+    stdio.print(m);
+    m = Shape.Circle(0.5);
+    if (m != null) {
+        match (m) {
+            Circle {
+                stdio.print(m.r);
+            }
+            else {
+            }
+        }
+    }
+    h.seq = range(7, 9);
+    stdio.print(h);
+}

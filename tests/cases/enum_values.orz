@@ -1,0 +1,124 @@
+// exit: 0
+// 列挙型の値を、いろいろな場所に入れる（中身の型、構造体、グローバル変数、ジェネリクスの入れ物、配列）。
+import stdio;
+import lists;
+import maps;
+
+enum Mixed {
+    A(flag:bool, small:8, n:32, big:64, d:decnum, s:string);
+    B(items:array:32, next:maybe:Mixed);
+    C;
+}
+
+enum Shape {
+    Circle(r:decnum);
+    Square(side:decnum);
+    Dot;
+}
+
+struct Pair {
+    first:Shape;
+    second:Shape;
+}
+
+immutable ORIGIN:Shape = Shape.Dot;
+immutable UNIT:Shape = Shape.Circle(1.0);
+last:Shape = Shape.Square(2.0);
+
+function decnum area(s:Shape) {
+    match (s) {
+        Circle {
+            return 3.0 * s.r * s.r;
+        }
+        Square {
+            return s.side * s.side;
+        }
+        Dot {
+            return 0.0;
+        }
+    }
+}
+
+function nothing describe(m:Mixed) {
+    match (m) {
+        A {
+            stdio.print("A {} {} {} {} {} {}", m.flag, m.small, m.n, m.big, m.d, m.s);
+            m.n = m.n + 1;
+            m.s = m.s + "!";
+        }
+        B {
+            stdio.print("B {} {}", m.items, m.next);
+        }
+        C {
+            stdio.print("C");
+        }
+    }
+}
+
+// ジェネリクスの関数でも使える。
+function T pick:T(s:Shape, a:T, b:T) {
+    match (s) {
+        Dot {
+            return a;
+        }
+        else {
+            return b;
+        }
+    }
+}
+
+function decnum apply(f:function:decnum(Shape), s:Shape) {
+    return f(s);
+}
+
+function nothing main() {
+    a:Mixed = Mixed.A(true, 200, -5, 5000000000, 1.5, "あ");
+    describe(a);
+    describe(a);
+    describe(Mixed.B([1, 2, 3], a));
+    describe(Mixed.B([], null));
+    describe(Mixed.C);
+
+    stdio.print(area(ORIGIN));
+    stdio.print(area(UNIT));
+    stdio.print(area(last));
+    last = Shape.Dot;
+    stdio.print(last == ORIGIN);
+    stdio.print(UNIT);
+
+    p:Pair = Pair(Shape.Circle(2.0), Shape.Dot);
+    stdio.print(p);
+    p.second = p.first;
+    stdio.print(area(p.second));
+    q:Pair = copy(p);
+    q.first = Shape.Dot;
+    stdio.print(p);
+    stdio.print(q);
+
+    list:lists.List:Shape = lists.new:Shape();
+    lists.push(list, Shape.Circle(1.0));
+    lists.push(list, Shape.Dot);
+    lists.push(list, Shape.Square(3.0));
+    total:decnum = 0.0;
+    i:32 = 0;
+    while (i < lists.count(list)) {
+        total = total + area(lists.get(list, i));
+        i = i + 1;
+    }
+    stdio.print(total);
+    stdio.print(lists.to_array(list));
+    table:maps.Map:Shape = maps.new:Shape();
+    maps.put(table, "円", Shape.Circle(9.0));
+    stdio.print(maps.get(table, "円"));
+    stdio.print(maps.get(table, "なし"));
+
+    shapes:array:Shape = array(3, Shape.Dot);
+    shapes[1] = Shape.Square(1.5);
+    stdio.print(shapes);
+    grid:array:array:Shape = [[Shape.Dot], [], [Shape.Circle(0.5), Shape.Dot]];
+    stdio.print(grid);
+
+    stdio.print(pick(Shape.Dot, "点", "点ではない"));
+    stdio.print(pick(UNIT, 1, 2));
+    stdio.print(apply(area, Shape.Square(4.0)));
+}
