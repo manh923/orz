@@ -11,7 +11,7 @@ enum Expr {
 function 64 f(e:Expr) {
     match (e) {
         Add, Neg {
-            return eval(e.inner);
+            return f(e.inner);
         }
         Num {
             return e.value;
