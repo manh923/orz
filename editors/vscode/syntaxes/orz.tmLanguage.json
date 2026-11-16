@@ -266,8 +266,16 @@
           "match": "\\bstruct\\b"
         },
         {
-          "name": "storage.type.enum.orz",
-          "match": "\\benum\\b"
+          "comment": "`{` が次の行にある enum",
+          "match": "\\b(enum)\\b(?:\\s+([A-Za-z_][A-Za-z_0-9]*))?",
+          "captures": {
+            "1": {
+              "name": "storage.type.enum.orz"
+            },
+            "2": {
+              "name": "entity.name.type.enum.orz"
+            }
+          }
         },
         {
           "name": "storage.modifier.orz",
