@@ -111,7 +111,7 @@ C コンパイラが `cc` という名前で見つからなければ、`CC=gcc c
 
 ### VS Code
 
-色分けの拡張機能が [editors/vscode](editors/vscode) にあります。`Ctrl+Shift+P` →「Extensions: Install from VSIX...」で、`editors/vscode/orz-0.1.3.vsix` を選ぶと入ります。
+色分けの拡張機能が [editors/vscode](editors/vscode) にあります。`Ctrl+Shift+P` →「Extensions: Install from VSIX...」で、`editors/vscode/orz-0.1.4.vsix` を選ぶと入ります。
 
 ## テスト
 
