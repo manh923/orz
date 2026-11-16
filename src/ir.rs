@@ -304,6 +304,8 @@ pub struct Program {
     pub strings: Vec<Vec<u8>>,
     /// 構造体を表示するための説明（ランタイムの orz_rt_put が読む）。
     pub struct_descs: Vec<Vec<u8>>,
+    /// 列挙型を表示するための説明（同じく、ランタイムが読む）。
+    pub enum_descs: Vec<Vec<u8>>,
     /// `main` の番号。
     pub main: u32,
     /// `main` が値を返すか（返すならそれが終了コード）。

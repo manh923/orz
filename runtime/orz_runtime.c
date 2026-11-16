@@ -1530,8 +1530,9 @@ void orz_rt_newline(void) {
     }
 }
 
-// 構造体を表示するための説明。コンパイラが出す。
+// 構造体と列挙型を表示するための説明。コンパイラが出す。
 extern const char *const orz_struct_descs[];
+extern const char *const orz_enum_descs[];
 
 static i64 elem_size(const char *desc) {
     switch (desc[0]) {
@@ -1549,7 +1550,7 @@ static int put_depth;
 
 // 型の説明 desc に従って、p にある値を 1 つ表示する。
 //   b = 8、i = 32、l = 64、B = bool、d = decnum、s = string、p = pointer・address、n = null、
-//   m = maybe（アドレスの型）、M = maybe（箱に入れた値）、[ = array、S番号; = 構造体
+//   m = maybe（アドレスの型）、M = maybe（箱に入れた値）、[ = array、S番号; = 構造体、E番号; = 列挙型
 static void put_value(const char *desc, const void *p, int quote) {
     switch (desc[0]) {
     case 'b':
@@ -1631,6 +1632,49 @@ static void put_value(const char *desc, const void *p, int quote) {
         put_depth++;
         out("(", 1);
         const char *f = sd + cstrlen(sd) + 1;
+        int first = 1;
+        while (*f) {
+            const char *fname = f;
+            const char *info = fname + cstrlen(fname) + 1; // 「位置:型の説明」
+            i64 offset = 0;
+            const char *q = info;
+            while (*q != ':') offset = offset * 10 + (*q++ - '0');
+            if (!first) out(", ", 2);
+            first = 0;
+            outs(fname);
+            out(": ", 2);
+            put_value(q + 1, obj + offset, 1);
+            f = info + cstrlen(info) + 1;
+        }
+        out(")", 1);
+        put_depth--;
+        break;
+    }
+    case 'E': {
+        // 値の先頭の 8 バイトが、種類の番号。説明は、名前の後ろに種類ごとの
+        // 「名前、中身ごとの（名前、位置:型の説明）、空の名前」が並ぶ。
+        const char *obj = *(const char *const *)p;
+        i64 index = 0;
+        for (const char *q = desc + 1; *q != ';'; q++) index = index * 10 + (*q - '0');
+        const char *ed = orz_enum_descs[index];
+        const char *v = ed + cstrlen(ed) + 1;
+        for (i64 tag = *(const i64 *)obj; tag > 0 && *v; tag--) {
+            const char *f = v + cstrlen(v) + 1;
+            while (*f) {
+                f += cstrlen(f) + 1;
+                f += cstrlen(f) + 1;
+            }
+            v = f + 1;
+        }
+        outs(v); // 種類の名前
+        const char *f = v + cstrlen(v) + 1;
+        if (!*f) break; // 中身のない種類は、名前だけ
+        if (put_depth > 20) {
+            outs("(…)");
+            break;
+        }
+        put_depth++;
+        out("(", 1);
         int first = 1;
         while (*f) {
             const char *fname = f;

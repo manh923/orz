@@ -982,6 +982,18 @@ impl<'a> Gen<'a> {
             asm!(self, ".quad .Lsd{}", i);
         }
         asm!(self, ".quad 0");
+        // 列挙型も同じ。
+        for (i, d) in self.prog.enum_descs.iter().enumerate() {
+            let _ = writeln!(self.out, ".Led{}:", i);
+            self.bytes(d);
+        }
+        asm!(self, ".balign 8");
+        asm!(self, ".globl orz_enum_descs");
+        let _ = writeln!(self.out, "orz_enum_descs:");
+        for i in 0..self.prog.enum_descs.len() {
+            asm!(self, ".quad .Led{}", i);
+        }
+        asm!(self, ".quad 0");
 
         let _ = writeln!(self.out, "\n\t.data");
         asm!(self, ".balign 8");

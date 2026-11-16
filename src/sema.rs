@@ -34,6 +34,8 @@ pub enum Ty {
     Maybe(Box<Ty>),
     /// 構造体（番号と名前）。値はアドレス。
     Struct(usize, Rc<str>),
+    /// 列挙型（番号と名前）。値はアドレスで、その先頭の 8 バイトが種類の番号。
+    Enum(usize, Rc<str>),
     /// 関数ポインタ（戻り値の型、引数の型）。戻り値の `None` は `nothing`。
     Func(Option<Box<Ty>>, Vec<Ty>),
     /// ジェネリクスの型引数。定義を確かめるときだけ使う、中身のわからない型。
@@ -55,7 +57,7 @@ impl Ty {
             Ty::Pointer(t) => format!("pointer:{}", t.name()),
             Ty::Array(t) => format!("array:{}", t.name()),
             Ty::Maybe(t) => format!("maybe:{}", t.name()),
-            Ty::Struct(_, name) | Ty::Param(_, name) => name.to_string(),
+            Ty::Struct(_, name) | Ty::Enum(_, name) | Ty::Param(_, name) => name.to_string(),
             Ty::Func(ret, params) => {
                 let ret = ret.as_ref().map(|t| t.name()).unwrap_or_else(|| "nothing".into());
                 let params: Vec<String> = params.iter().map(|t| t.name()).collect();
@@ -101,7 +103,13 @@ impl Ty {
     /// maybe:32 などの箱は、arena の中でも GC 側に作るので対象外。関数はプログラムの中にあるので対象外。
     fn has_level(&self) -> bool {
         match self {
-            Ty::Str | Ty::Array(_) | Ty::Pointer(_) | Ty::Struct(..) | Ty::Address | Ty::Param(..) => true,
+            Ty::Str
+            | Ty::Array(_)
+            | Ty::Pointer(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Address
+            | Ty::Param(..) => true,
             Ty::Maybe(inner) => !inner.needs_box() && inner.has_level(),
             _ => false,
         }
@@ -138,6 +146,7 @@ impl Ty {
             Ty::Maybe(t) => format!("m{}", t.desc()),
             Ty::Array(t) => format!("[{}", t.desc()),
             Ty::Struct(i, _) => format!("S{};", i),
+            Ty::Enum(i, _) => format!("E{};", i),
         }
     }
 }
@@ -217,11 +226,28 @@ struct FieldInfo {
     offset: i64,
 }
 
-/// 入れ場所の種類：構造体のフィールド（構造体, 何番目）か、array・pointer の要素（要素の型）。
+/// 入れ場所の種類：構造体のフィールド（構造体, 何番目）、列挙型の中身（列挙型, 種類, 何番目）、
+/// array・pointer の要素（要素の型）。
 #[derive(PartialEq, Eq, Hash)]
 enum SlotKey {
     Field(usize, usize),
+    Variant(usize, usize, usize),
     Elem(Ty),
+}
+
+/// 列挙型の種類の 1 つ。
+struct VariantInfo {
+    name: String,
+    /// 中身。位置は、先頭にある種類の番号（8 バイト）の後ろから。
+    fields: Vec<FieldInfo>,
+    size: i64,
+}
+
+struct EnumInfo<'p> {
+    def: &'p EnumDef,
+    module: usize,
+    name: Rc<str>,
+    variants: Vec<VariantInfo>,
 }
 
 struct StructInfo<'p> {
@@ -249,6 +275,7 @@ enum TopName {
     Global(usize),
     Struct(usize),
     GenericStruct(usize),
+    Enum(usize),
 }
 
 /// `import` した名前空間が指すもの。
@@ -287,6 +314,7 @@ struct Ctx<'p> {
     structs: Vec<StructInfo<'p>>,
     generic_structs: Vec<GenericStruct<'p>>,
     struct_instances: HashMap<(usize, Vec<Ty>), usize>,
+    enums: Vec<EnumInfo<'p>>,
     strings: Vec<Vec<u8>>,
     string_ids: HashMap<Vec<u8>, u32>,
     /// グローバル変数の初期化の関数（main の前に、この順に呼ぶ）。
@@ -334,10 +362,24 @@ impl<'p> Ctx<'p> {
         Ty::Struct(i, self.structs[i].name.clone())
     }
 
+    fn enum_ty(&self, i: usize) -> Ty {
+        Ty::Enum(i, self.enums[i].name.clone())
+    }
+
+    /// 列挙型の種類の名前を並べたもの（エラーメッセージ用）。
+    fn variant_names(&self, i: usize) -> String {
+        let names: Vec<&str> = self.enums[i].variants.iter().map(|v| v.name.as_str()).collect();
+        names.join("、")
+    }
+
     /// t 型の値が、中に別のもの（構造体・配列など、arena の中で作られうるもの）を入れられるか。
     fn is_deep(&self, t: &Ty) -> bool {
         match t {
             Ty::Struct(i, _) => self.structs[*i].fields.iter().any(|f| f.ty.has_level()),
+            Ty::Enum(i, _) => self.enums[*i]
+                .variants
+                .iter()
+                .any(|v| v.fields.iter().any(|f| f.ty.has_level())),
             Ty::Array(e) | Ty::Pointer(e) => e.has_level(),
             Ty::Maybe(inner) => self.is_deep(inner),
             _ => false,
@@ -348,6 +390,12 @@ impl<'p> Ctx<'p> {
     fn field_slots(&mut self, s: usize, j: usize) -> Vec<u32> {
         let t = self.structs[s].fields[j].ty.clone();
         self.slots_for(SlotKey::Field(s, j), &t)
+    }
+
+    /// 列挙型 e の種類 k の、j 番目の中身の、入れ場所の種類。
+    fn variant_slots(&mut self, e: usize, k: usize, j: usize) -> Vec<u32> {
+        let t = self.enums[e].variants[k].fields[j].ty.clone();
+        self.slots_for(SlotKey::Variant(e, k, j), &t)
     }
 
     /// t 型の要素（array と pointer）の、入れ場所の種類。
@@ -385,6 +433,7 @@ impl<'p> Ctx<'p> {
             TopName::Global(i) => self.globals[i].decl.exported,
             TopName::Struct(i) => self.structs[i].def.exported,
             TopName::GenericStruct(g) => self.generic_structs[g].def.exported,
+            TopName::Enum(i) => self.enums[i].def.exported,
         }
     }
 
@@ -483,6 +532,7 @@ impl<'p> Ctx<'p> {
                 };
                 match self.find(m, ns.as_deref(), name, a.span)? {
                     Some(Target::Top(TopName::Struct(i))) => self.struct_ty(i),
+                    Some(Target::Top(TopName::Enum(i))) => self.enum_ty(i),
                     Some(Target::Top(TopName::GenericStruct(g))) => {
                         let n = self.generic_structs[g].def.type_params.len();
                         let mut args = Vec::new();
@@ -532,6 +582,40 @@ impl<'p> Ctx<'p> {
         self.structs[i].size = (offset + align - 1) / align * align;
         self.structs[i].fields = fields;
         check_struct_cycle(self, i)
+    }
+
+    /// 列挙型の種類ごとに、中身の型を決めて並べる。先頭の 8 バイトは種類の番号。
+    fn resolve_variants(&mut self, i: usize) -> Result<(), Diag> {
+        let (def, m) = (self.enums[i].def, self.enums[i].module);
+        let mut variants: Vec<VariantInfo> = Vec::new();
+        for v in &def.variants {
+            if variants.iter().any(|x| x.name == v.name) {
+                return Err(Diag::new(v.span, format!("種類 `{}` が 2 つあります", v.name)));
+            }
+            let mut fields: Vec<FieldInfo> = Vec::new();
+            let mut offset = 8i64;
+            for f in &v.fields {
+                if fields.iter().any(|x| x.name == f.name) {
+                    return Err(Diag::new(f.span, format!("中身 `{}` が 2 つあります", f.name)));
+                }
+                let ty = self.resolve_type(m, &f.ty, &Vec::new())?;
+                let w = ty.width().bytes();
+                offset = (offset + w - 1) / w * w;
+                fields.push(FieldInfo {
+                    name: f.name.clone(),
+                    ty,
+                    offset,
+                });
+                offset += w;
+            }
+            variants.push(VariantInfo {
+                name: v.name.clone(),
+                fields,
+                size: (offset + 7) / 8 * 8,
+            });
+        }
+        self.enums[i].variants = variants;
+        Ok(())
     }
 
     /// ジェネリクスの構造体を、型を決めて展開する（同じ型なら前に作ったものを使う）。
@@ -637,6 +721,54 @@ fn check_struct_cycle(ctx: &Ctx, start: usize) -> Result<(), Diag> {
             ),
         )
         .hint("自分と同じ構造体のフィールドには maybe を付けます（例：next:maybe:Node;）"));
+    }
+    Ok(())
+}
+
+/// どの種類も（maybe を付けずに）自分自身を含む列挙型は、値を作れないのでエラーにする。
+fn check_enum_cycles(ctx: &Ctx) -> Result<(), Diag> {
+    // 値を作れるとわかった構造体と列挙型。変わらなくなるまで繰り返す。
+    let mut structs = vec![false; ctx.structs.len()];
+    let mut enums = vec![false; ctx.enums.len()];
+    fn can_make(t: &Ty, structs: &[bool], enums: &[bool]) -> bool {
+        match t {
+            Ty::Struct(i, _) => structs[*i],
+            Ty::Enum(i, _) => enums[*i],
+            _ => true,
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (i, s) in ctx.structs.iter().enumerate() {
+            if !structs[i] && s.fields.iter().all(|f| can_make(&f.ty, &structs, &enums)) {
+                structs[i] = true;
+                changed = true;
+            }
+        }
+        for (i, e) in ctx.enums.iter().enumerate() {
+            let ok = e
+                .variants
+                .iter()
+                .any(|v| v.fields.iter().all(|f| can_make(&f.ty, &structs, &enums)));
+            if !enums[i] && ok {
+                enums[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if let Some(i) = enums.iter().position(|ok| !ok) {
+        let e = &ctx.enums[i];
+        return Err(Diag::new(
+            e.def.name_span,
+            format!(
+                "列挙型 `{}` は、どの種類も maybe を付けずに自分自身を含んでいます（これでは作れません）",
+                e.name
+            ),
+        )
+        .hint("中身のない種類を足すか、自分と同じ型の中身に maybe を付けます"));
     }
     Ok(())
 }
@@ -750,6 +882,7 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
         structs: Vec::new(),
         generic_structs: Vec::new(),
         struct_instances: HashMap::new(),
+        enums: Vec::new(),
         strings: Vec::new(),
         string_ids: HashMap::new(),
         global_inits: Vec::new(),
@@ -827,21 +960,20 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     s.name_span,
                     TopName::GenericStruct(ctx.generic_structs.len()),
                 ),
-                Item::Enum(e) => {
-                    return Err(Diag::new(e.name_span, "`enum` は、まだ作っている途中です"))
-                }
+                Item::Enum(e) => (&e.name, e.name_span, TopName::Enum(ctx.enums.len())),
                 Item::Import(_) => continue,
             };
             let what = match top {
                 TopName::Func(_) | TopName::GenericFunc(_) => "関数の名前",
                 TopName::Global(_) => "グローバル変数の名前",
                 TopName::Struct(_) | TopName::GenericStruct(_) => "構造体の名前",
+                TopName::Enum(_) => "列挙型の名前",
             };
             ctx.reserved(m, span, name, what)?;
             if ctx.mods[m].names.insert(name, top).is_some() {
                 return Err(
                     Diag::new(span, format!("`{}` という名前が 2 回定義されています", name))
-                        .hint("関数、構造体、グローバル変数は、すべて違う名前にします"),
+                        .hint("関数、構造体、列挙型、グローバル変数は、すべて違う名前にします"),
                 );
             }
             match item {
@@ -873,7 +1005,13 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                     module: m,
                     instances: 0,
                 }),
-                Item::Enum(_) | Item::Import(_) => {}
+                Item::Enum(e) => ctx.enums.push(EnumInfo {
+                    def: e,
+                    module: m,
+                    name: Rc::from(e.name.as_str()),
+                    variants: Vec::new(),
+                }),
+                Item::Import(_) => {}
             }
         }
     }
@@ -888,6 +1026,11 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
         let params = opaque_params(&def.type_params);
         ctx.instantiate_struct(g, params, def.name_span)?;
     }
+    // 列挙型の種類と、その中身。
+    for i in 0..ctx.enums.len() {
+        ctx.resolve_variants(i)?;
+    }
+    check_enum_cycles(&ctx)?;
 
     // 4. 関数の引数と戻り値の型。
     for (m, f) in &normal_funcs {
@@ -962,6 +1105,12 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
                 "`main` は関数の名前に使います",
             ))
         }
+        Some(TopName::Enum(i)) => {
+            return Err(Diag::new(
+                ctx.enums[i].def.name_span,
+                "`main` は関数の名前に使います",
+            ))
+        }
         None => {
             return Err(Diag::new(Span::new(0, 0), "`main` 関数がありません")
                 .hint("プログラムは `function nothing main() { ... }` から始まります"))
@@ -1012,6 +1161,28 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
             d
         })
         .collect();
+    let enum_descs = ctx
+        .enums
+        .iter()
+        .map(|e| {
+            // 名前\0 と、種類ごとに「名前\0、中身ごとの（名前\0 位置:型の説明\0）、\0」、最後に \0。
+            let mut d = e.name.as_bytes().to_vec();
+            d.push(0);
+            for v in &e.variants {
+                d.extend_from_slice(v.name.as_bytes());
+                d.push(0);
+                for f in &v.fields {
+                    d.extend_from_slice(f.name.as_bytes());
+                    d.push(0);
+                    d.extend_from_slice(format!("{}:{}", f.offset, f.ty.desc()).as_bytes());
+                    d.push(0);
+                }
+                d.push(0);
+            }
+            d.push(0);
+            d
+        })
+        .collect();
     let globals = ctx
         .globals
         .iter()
@@ -1028,6 +1199,7 @@ pub fn lower(modules: &[Program], os: Os) -> Result<ir::Program, Diag> {
         globals,
         strings: ctx.strings,
         struct_descs,
+        enum_descs,
         main: main as u32,
         main_returns,
         main_takes_args,
@@ -1127,6 +1299,7 @@ fn top_name_conflict(span: Span, name: &str, top: TopName) -> Diag {
         TopName::Func(_) | TopName::GenericFunc(_) => "関数",
         TopName::Global(_) => "グローバル変数",
         TopName::Struct(_) | TopName::GenericStruct(_) => "構造体",
+        TopName::Enum(_) => "列挙型",
     };
     Diag::new(
         span,
@@ -1270,6 +1443,8 @@ struct FnLower<'c, 'p> {
     declared_somewhere: HashSet<String>,
     /// 今の場所で null でないとわかっている `maybe` の変数。
     narrowed: HashSet<u32>,
+    /// 今の場所で、`match` によって種類のわかっている列挙型の変数と、その種類の番号。
+    variants: HashMap<u32, usize>,
     /// 今の場所に来ることがあるか（`return` の後ろなどは来ない）。
     reachable: bool,
     /// グローバル変数の初期値で、main の前に実行する必要がある（配列や構造体を作る）か。
@@ -1413,6 +1588,14 @@ fn collect_decls_stmt(s: &Stmt, out: &mut HashSet<String>) {
             }
         }
         StmtKind::While { body, .. } | StmtKind::Arena(body) => collect_decls(body, out),
+        StmtKind::Match { arms, els, .. } => {
+            for a in arms {
+                collect_decls(&a.body, out);
+            }
+            if let Some(b) = els {
+                collect_decls(b, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1444,6 +1627,14 @@ fn assigned_names_stmt(s: &Stmt, out: &mut HashSet<String>) {
             }
         }
         StmtKind::While { body, .. } | StmtKind::Arena(body) => assigned_names(body, out),
+        StmtKind::Match { arms, els, .. } => {
+            for a in arms {
+                assigned_names(&a.body, out);
+            }
+            if let Some(b) = els {
+                assigned_names(b, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1466,6 +1657,10 @@ fn stmt_returns(s: &Stmt) -> bool {
                 }
         }
         StmtKind::Arena(b) => block_returns(b),
+        // `else` がなければ、すべての種類が書かれている（そうでなければコンパイルエラー）。
+        StmtKind::Match { arms, els, .. } => {
+            arms.iter().all(|a| block_returns(&a.body)) && els.as_ref().is_none_or(block_returns)
+        }
         // `while (true)` は、中に（この while を抜ける）`break` がなければ終わらない。
         StmtKind::While { cond, body } => matches!(cond.kind, ExprKind::Bool(true)) && !has_break(body),
         _ => false,
@@ -1489,6 +1684,9 @@ fn stmt_has_break(s: &Stmt) -> bool {
                 }
         }
         StmtKind::Arena(b) => has_break(b),
+        StmtKind::Match { arms, els, .. } => {
+            arms.iter().any(|a| has_break(&a.body)) || els.as_ref().is_some_and(has_break)
+        }
         _ => false,
     }
 }
@@ -1508,6 +1706,8 @@ fn is_logic(op: BinOp) -> bool {
 }
 
 const MAYBE_HINT: &str = "null かもしれない値は、`if (x != null) { … }` で確かめると、その中で使えます。確かめられるのはローカル変数と引数だけなので、フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから確かめます";
+
+const MATCH_HINT: &str = "`match (e) { Num { … e.value … } }` のように、種類を 1 つだけ書いた `{ }` の中で使えます。確かめられるのはローカル変数と引数だけなので、フィールド・配列の要素・グローバル変数は、いったんローカル変数に入れてから `match` で調べます";
 
 const PARAM_HINT: &str =
     "型引数（T など）の値にできるのは、代入、引数として渡す、return だけです。計算や比較が必要なら、その関数を引数で受け取ります（例：less:function:bool(T, T)）";
@@ -1542,6 +1742,32 @@ fn maybe_hint(d: Diag) -> Diag {
     d.hint(MAYBE_HINT)
 }
 
+/// 分かれた道ごとの、（来ることがあるか、null でないとわかっている変数、種類のわかっている変数）。
+type Flow = (bool, HashSet<u32>, HashMap<u32, usize>);
+
+/// 合流：来ることのある道だけで、共通してわかっていること。
+fn join_flows(flows: Vec<Flow>) -> Flow {
+    let mut joined: Option<Flow> = None;
+    let mut first: Option<Flow> = None;
+    for f in flows {
+        if !f.0 {
+            first.get_or_insert(f);
+            continue;
+        }
+        joined = Some(match joined {
+            None => f,
+            Some((_, n, v)) => {
+                let variants = v.into_iter().filter(|(var, k)| f.2.get(var) == Some(k)).collect();
+                (true, &n & &f.1, variants)
+            }
+        });
+    }
+    // どの道も来ないなら、最初の道のものにしておく（後ろの文は実行されない）。
+    joined
+        .or(first)
+        .unwrap_or((true, HashSet::new(), HashMap::new()))
+}
+
 impl<'c, 'p> FnLower<'c, 'p> {
     fn new(ctx: &'c mut Ctx<'p>, module: usize, ret: Option<Ty>, mode: Mode, tparams: TParams) -> Self {
         FnLower {
@@ -1558,6 +1784,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             loops: Vec::new(),
             declared_somewhere: HashSet::new(),
             narrowed: HashSet::new(),
+            variants: HashMap::new(),
             reachable: true,
             needs_init: false,
             arena_depth: 0,
@@ -1817,9 +2044,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
             StmtKind::Assign { target, value } => self.assign(target, value)?,
             StmtKind::If { cond, then, els } => self.if_stmt(cond, then, els.as_ref())?,
             StmtKind::While { cond, body } => self.while_stmt(cond, body)?,
-            StmtKind::Match { value, .. } => {
-                return Err(Diag::new(value.span, "`match` は、まだ作っている途中です"))
-            }
+            StmtKind::Match { value, arms, els } => self.match_stmt(value, arms, els.as_ref())?,
             StmtKind::Break | StmtKind::Continue => {
                 let is_break = matches!(s.kind, StmtKind::Break);
                 let Some(&(head, end, depth)) = self.loops.last() else {
@@ -1933,6 +2158,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
                                 format!("`{}` は構造体なので、代入できません", name),
                             ))
                         }
+                        Some(TopName::Enum(_)) => {
+                            return Err(Diag::new(
+                                target.span,
+                                format!("`{}` は列挙型なので、代入できません", name),
+                            ))
+                        }
                         None => return Err(self.unknown_var(target.span, name)),
                     }
                 }
@@ -1990,6 +2221,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
         self.emit(Inst::Store { place, src: v });
         if let Some(var) = local {
             self.after_store(var, &ty, &vt);
+            // 別の値が入ったので、`match` で確かめた種類はもうわからない。
+            self.variants.remove(&var);
         }
         Ok(())
     }
@@ -1997,6 +2230,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
     fn if_stmt(&mut self, cond: &Expr, then: &Block, els: Option<&Else>) -> Result<(), Diag> {
         let (true_facts, false_facts) = self.cond_facts(cond);
         let entry = self.narrowed.clone();
+        let entry_variants = self.variants.clone();
         let entry_reachable = self.reachable;
         let c = self.cond(cond)?;
         let then_l = self.label();
@@ -2010,30 +2244,321 @@ impl<'c, 'p> FnLower<'c, 'p> {
 
         self.emit(Inst::Label(then_l));
         self.narrowed = &entry | &true_facts;
+        self.variants = entry_variants.clone();
         self.reachable = entry_reachable;
         self.block(then)?;
-        let then_flow = (self.reachable, std::mem::take(&mut self.narrowed));
+        let then_flow = self.take_flow();
         self.emit(Inst::Jump(end));
 
         self.emit(Inst::Label(else_l));
         self.narrowed = &entry | &false_facts;
+        self.variants = entry_variants;
         self.reachable = entry_reachable;
         match els {
             Some(Else::Block(b)) => self.block(b)?,
             Some(Else::If(s)) => self.stmt(s)?,
             None => {}
         }
-        let else_flow = (self.reachable, std::mem::take(&mut self.narrowed));
+        let else_flow = self.take_flow();
         self.emit(Inst::Label(end));
 
-        // 合流：来ることのある道だけで、共通して null でないもの。
-        (self.reachable, self.narrowed) = match (then_flow, else_flow) {
-            ((true, t), (true, e)) => (true, &t & &e),
-            ((true, t), (false, _)) => (true, t),
-            ((false, _), (true, e)) => (true, e),
-            ((false, t), (false, _)) => (false, t),
-        };
+        // 合流：来ることのある道だけで、共通してわかっていること。
+        (self.reachable, self.narrowed, self.variants) = join_flows(vec![then_flow, else_flow]);
         Ok(())
+    }
+
+    /// 今の場所でわかっていることを取り出す（道が分かれるところで使う）。
+    fn take_flow(&mut self) -> Flow {
+        (
+            self.reachable,
+            std::mem::take(&mut self.narrowed),
+            std::mem::take(&mut self.variants),
+        )
+    }
+
+    /// `match (e) { Num { … } Add, Sub { … } else { … } }`
+    fn match_stmt(&mut self, value: &Expr, arms: &[MatchArm], els: Option<&Block>) -> Result<(), Diag> {
+        let (v, t) = self.expr(value, None)?;
+        let ei = match &t {
+            Ty::Enum(i, _) => *i,
+            Ty::Maybe(inner) if matches!(**inner, Ty::Enum(..)) => {
+                return Err(maybe_hint(Diag::new(
+                    value.span,
+                    format!(
+                        "`{}` 型の値は、null でないことを確かめてから `match` で調べます",
+                        t.name()
+                    ),
+                )))
+            }
+            _ => {
+                return Err(Diag::new(
+                    value.span,
+                    format!(
+                        "`match` で調べられるのは列挙型の値だけですが、この式は `{}` 型です",
+                        t.name()
+                    ),
+                )
+                .hint("列挙型は `enum Shape { Circle(r:decnum); Empty; }` のように定義します"))
+            }
+        };
+        // 調べる値がローカル変数（か引数）なら、種類を 1 つだけ書いた枝の中で、その中身を使えるようにする。
+        let local = match &value.kind {
+            ExprKind::Var(name) => self.lookup(name).map(|l| l.var),
+            _ => None,
+        };
+        // 種類ごとに、どの枝へ行くか。
+        let nvariants = self.ctx.enums[ei].variants.len();
+        let mut covered = vec![false; nvariants];
+        let mut order: Vec<(usize, usize)> = Vec::new();
+        for (ai, arm) in arms.iter().enumerate() {
+            for (name, span) in &arm.names {
+                let k = self.variant_index(ei, name, *span)?;
+                if covered[k] {
+                    return Err(Diag::new(*span, format!("種類 `{}` が 2 回書かれています", name)));
+                }
+                covered[k] = true;
+                order.push((k, ai));
+            }
+        }
+        if els.is_none() {
+            let missing: Vec<String> = (0..nvariants)
+                .filter(|k| !covered[*k])
+                .map(|k| format!("`{}`", self.ctx.enums[ei].variants[k].name))
+                .collect();
+            if !missing.is_empty() {
+                return Err(Diag::new(
+                    value.span,
+                    format!("`match` に、種類 {} がありません", missing.join("、")),
+                )
+                .hint("すべての種類を書くか、残りをまとめて `else { … }` で受けます"));
+            }
+        }
+
+        let entry_narrowed = self.narrowed.clone();
+        let entry_variants = self.variants.clone();
+        let entry_reachable = self.reachable;
+        let tag = self.temp();
+        self.emit(Inst::Load {
+            dst: tag,
+            addr: v,
+            width: Width::W8,
+        });
+        let arm_labels: Vec<u32> = arms.iter().map(|_| self.label()).collect();
+        let else_l = self.label();
+        let end = self.label();
+        // `else` がなければ、すべての種類が書かれているので、最後の種類は比べずに行く。
+        let tests = if els.is_some() { order.len() } else { order.len() - 1 };
+        for &(k, ai) in &order[..tests] {
+            let c = self.temp();
+            self.emit(Inst::Cmp {
+                dst: c,
+                op: CmpOp::Eq,
+                a: Operand::Temp(tag),
+                b: Operand::Imm(k as i64),
+            });
+            let next = self.label();
+            self.emit(Inst::Branch {
+                cond: Operand::Temp(c),
+                then: arm_labels[ai],
+                els: next,
+            });
+            self.emit(Inst::Label(next));
+        }
+        self.emit(Inst::Jump(match order.get(tests) {
+            Some(&(_, ai)) => arm_labels[ai],
+            None => else_l,
+        }));
+
+        let mut flows = Vec::new();
+        for (ai, arm) in arms.iter().enumerate() {
+            self.cur_span = arm.names[0].1;
+            self.emit(Inst::Label(arm_labels[ai]));
+            self.narrowed = entry_narrowed.clone();
+            self.variants = entry_variants.clone();
+            self.reachable = entry_reachable;
+            if let (Some(var), [(name, span)]) = (local, arm.names.as_slice()) {
+                let k = self.variant_index(ei, name, *span)?;
+                self.variants.insert(var, k);
+            }
+            self.block(&arm.body)?;
+            flows.push(self.take_flow());
+            self.emit(Inst::Jump(end));
+        }
+        self.emit(Inst::Label(else_l));
+        self.narrowed = entry_narrowed;
+        self.variants = entry_variants;
+        self.reachable = entry_reachable;
+        if let Some(b) = els {
+            self.block(b)?;
+            flows.push(self.take_flow());
+        }
+        self.emit(Inst::Label(end));
+        (self.reachable, self.narrowed, self.variants) = join_flows(flows);
+        Ok(())
+    }
+
+    /// 列挙型 ei の、名前が `name` の種類の番号。
+    fn variant_index(&self, ei: usize, name: &str, span: Span) -> Result<usize, Diag> {
+        let e = &self.ctx.enums[ei];
+        e.variants.iter().position(|v| v.name == name).ok_or_else(|| {
+            Diag::new(
+                span,
+                format!("列挙型 `{}` に `{}` という種類はありません", e.name, name),
+            )
+            .hint(format!("あるのは {} です", self.ctx.variant_names(ei)))
+        })
+    }
+
+    /// 式が列挙型の名前（`Shape`、`ns.Shape`）なら、その番号。
+    fn enum_ref(&self, e: &Expr) -> Option<usize> {
+        match &e.kind {
+            ExprKind::Var(name) if self.lookup(name).is_none() => match self.top(name) {
+                Some(TopName::Enum(i)) => Some(i),
+                _ => None,
+            },
+            ExprKind::Field(obj, name) => match &obj.kind {
+                ExprKind::Var(ns) if self.is_namespace(ns) => {
+                    match self.ctx.member(self.module, ns, name, e.span) {
+                        Ok(Target::Top(TopName::Enum(i))) => Some(i),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `match` で種類のわかっているローカル変数なら、その種類の番号。
+    fn known_variant(&self, e: &Expr) -> Option<usize> {
+        match &e.kind {
+            ExprKind::Var(name) => self.lookup(name).and_then(|l| self.variants.get(&l.var).copied()),
+            _ => None,
+        }
+    }
+
+    /// `Shape.Circle(1.0)`、`Color.Red`：列挙型の値を作る。`args` が `None` なら `( )` なし。
+    fn variant_new(
+        &mut self,
+        e: &Expr,
+        ei: usize,
+        vname: &str,
+        args: Option<&[Expr]>,
+    ) -> Result<(Operand, Ty), Diag> {
+        let k = self.variant_index(ei, vname, e.span)?;
+        let ty = self.ctx.enum_ty(ei);
+        let shown = format!("{}.{}", ty.name(), vname);
+        let fields: Vec<(String, Ty, i64)> = self.ctx.enums[ei].variants[k]
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), f.ty.clone(), f.offset))
+            .collect();
+        let names: Vec<&str> = fields.iter().map(|f| f.0.as_str()).collect();
+        let Some(args) = args else {
+            if !fields.is_empty() {
+                return Err(Diag::new(
+                    e.span,
+                    format!("`{}` には中身があるので、`{}(…)` のように値を渡します", shown, shown),
+                )
+                .hint(format!("中身の順に値を渡します（{}）", names.join("、"))));
+            }
+            // 中身のない種類は、プログラムの中に 1 つだけ置いたもの（種類の番号だけ）を指す。
+            let tag = self.ctx.intern(&(k as u64).to_le_bytes());
+            return Ok((Operand::Str(tag), ty));
+        };
+        if fields.is_empty() {
+            return Err(Diag::new(
+                e.span,
+                format!("`{}` には中身がないので、`( )` を付けずに `{}` と書きます", shown, shown),
+            ));
+        }
+        if args.len() != fields.len() {
+            return Err(Diag::new(
+                e.span,
+                format!(
+                    "`{}` の中身は {} 個ですが、{} 個書かれています",
+                    shown,
+                    fields.len(),
+                    args.len()
+                ),
+            )
+            .hint(format!("中身の順に値を渡します（{}）", names.join("、"))));
+        }
+        let mut values = Vec::new();
+        for (arg, (_, fty, _)) in args.iter().zip(&fields) {
+            values.push(self.expr_as(arg, fty)?);
+        }
+        let size = self.ctx.enums[ei].variants[k].size;
+        let p = self.rt_value(Rt::Alloc, vec![Operand::Imm(size)], e.span)?;
+        self.emit(Inst::StoreMem {
+            addr: p,
+            src: Operand::Imm(k as i64),
+            width: Width::W8,
+        });
+        for (j, (v, (_, fty, offset))) in values.into_iter().zip(&fields).enumerate() {
+            let addr = self.temp();
+            self.emit(Inst::ElemAddr {
+                dst: addr,
+                base: p,
+                index: Operand::Imm(*offset),
+                scale: 1,
+            });
+            let slots = self.ctx.variant_slots(ei, k, j);
+            self.emit_slots(
+                Inst::StoreMem {
+                    addr: Operand::Temp(addr),
+                    src: v,
+                    width: fty.width(),
+                },
+                slots,
+            );
+        }
+        Ok((p, ty))
+    }
+
+    /// `e.value`：`match` で種類のわかっている変数の、中身のアドレス。
+    fn variant_field_addr(
+        &mut self,
+        e: &Expr,
+        obj: &Expr,
+        ov: Operand,
+        ei: usize,
+        field: &str,
+    ) -> Result<(Operand, Ty, Vec<u32>), Diag> {
+        let ename = self.ctx.enums[ei].name.clone();
+        let Some(k) = self.known_variant(obj) else {
+            return Err(Diag::new(
+                e.span,
+                format!("列挙型 `{}` の中身は、`match` で種類を確かめてから使います", ename),
+            )
+            .hint(MATCH_HINT));
+        };
+        let variant = &self.ctx.enums[ei].variants[k];
+        let Some(j) = variant.fields.iter().position(|f| f.name == field) else {
+            let names: Vec<&str> = variant.fields.iter().map(|f| f.name.as_str()).collect();
+            return Err(Diag::new(
+                e.span,
+                format!("`{}.{}` に `{}` という中身はありません", ename, variant.name, field),
+            )
+            .hint(format!(
+                "あるのは {} です",
+                if names.is_empty() {
+                    "（なし）".to_string()
+                } else {
+                    names.join("、")
+                }
+            )));
+        };
+        let (offset, fty) = (variant.fields[j].offset, variant.fields[j].ty.clone());
+        let dst = self.temp();
+        self.emit(Inst::ElemAddr {
+            dst,
+            base: ov,
+            index: Operand::Imm(offset),
+            scale: 1,
+        });
+        let slots = self.ctx.variant_slots(ei, k, j);
+        Ok((Operand::Temp(dst), fty, slots))
     }
 
     fn while_stmt(&mut self, cond: &Expr, body: &Block) -> Result<(), Diag> {
@@ -2045,6 +2570,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
             .filter_map(|n| self.lookup(n).map(|l| l.var))
             .collect();
         let head_state: HashSet<u32> = &self.narrowed - &assigned_vars;
+        let head_variants: HashMap<u32, usize> = self
+            .variants
+            .iter()
+            .filter(|(var, _)| !assigned_vars.contains(var))
+            .map(|(var, k)| (*var, *k))
+            .collect();
         let entry_reachable = self.reachable;
         let (true_facts, false_facts) = self.cond_facts(cond);
 
@@ -2053,6 +2584,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         let end = self.label();
         self.emit(Inst::Label(head));
         self.narrowed = head_state.clone();
+        self.variants = head_variants.clone();
         let c = self.cond(cond)?;
         self.emit(Inst::Branch {
             cond: c,
@@ -2073,6 +2605,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
         } else {
             &head_state | &false_facts
         };
+        self.variants = head_variants;
         let infinite = matches!(cond.kind, ExprKind::Bool(true)) && !breaks;
         self.reachable = entry_reachable && !infinite;
         Ok(())
@@ -2173,6 +2706,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 }
             }
             ExprKind::Call(callee, args) => {
+                // `Shape.Circle(1.0)`
+                if let ExprKind::Field(obj, _) = &callee.kind {
+                    if let Some(i) = self.enum_ref(obj) {
+                        return Some(self.ctx.enum_ty(i));
+                    }
+                }
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.lookup(name).is_none() {
                         match name.as_str() {
@@ -2220,6 +2759,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     },
                 }
             }
+            // `Color.Red`
+            ExprKind::Field(obj, _) if self.enum_ref(obj).is_some() => {
+                self.enum_ref(obj).map(|i| self.ctx.enum_ty(i))
+            }
             ExprKind::Field(obj, f) => match &obj.kind {
                 ExprKind::Var(ns) if self.is_namespace(ns) => {
                     match self.ctx.member(self.module, ns, f, e.span) {
@@ -2234,6 +2777,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                         .iter()
                         .find(|x| x.name == *f)
                         .map(|x| x.ty.clone()),
+                    Ty::Enum(i, _) => {
+                        let k = self.known_variant(obj)?;
+                        self.ctx.enums[i].variants[k]
+                            .fields
+                            .iter()
+                            .find(|x| x.name == *f)
+                            .map(|x| x.ty.clone())
+                    }
                     _ => None,
                 },
             },
@@ -2375,6 +2926,10 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 Ok((Operand::Temp(dst), elem))
             }
             ExprKind::Field(obj, f) => {
+                // `Color.Red`
+                if let Some(i) = self.enum_ref(obj) {
+                    return self.variant_new(e, i, f, None);
+                }
                 if let ExprKind::Var(ns) = &obj.kind {
                     if self.is_namespace(ns) {
                         let shown = format!("{}.{}", ns, f);
@@ -2528,6 +3083,11 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 span,
                 format!("`{}` は構造体の名前です。作るなら `{}(…)` と書きます", name, name),
             )),
+            TopName::Enum(i) => Err(Diag::new(
+                span,
+                format!("`{}` は列挙型の名前です。値は `{}.種類` のように書きます", name, name),
+            )
+            .hint(format!("種類は {} です", self.ctx.variant_names(i)))),
         }
     }
 
@@ -2685,7 +3245,8 @@ impl<'c, 'p> FnLower<'c, 'p> {
         let (ov, ot) = self.expr(obj, None)?;
         let i = match &ot {
             Ty::Struct(i, _) => *i,
-            Ty::Maybe(inner) if matches!(**inner, Ty::Struct(..)) => {
+            Ty::Enum(ei, _) => return self.variant_field_addr(e, obj, ov, *ei, field),
+            Ty::Maybe(inner) if matches!(**inner, Ty::Struct(..) | Ty::Enum(..)) => {
                 return Err(maybe_hint(Diag::new(
                     obj.span,
                     format!(
@@ -3112,6 +3673,12 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 });
             }
         }
+        // `Shape.Circle(1.0)`
+        if let ExprKind::Field(obj, vname) = &callee.kind {
+            if let Some(i) = self.enum_ref(obj) {
+                return self.variant_new(e, i, vname, Some(args)).map(Some);
+            }
+        }
         // `get:32(…)`、`List:32(…)`
         if let ExprKind::Generic(inner, types) = &callee.kind {
             let Some((target, shown)) = self.callee_target(inner) else {
@@ -3169,6 +3736,14 @@ impl<'c, 'p> FnLower<'c, 'p> {
                 )
                 .hint(format!("例：{}:{}(…)", shown, example.join(":"))))
             }
+            Some((Target::Top(TopName::Enum(i)), shown)) => Err(Diag::new(
+                callee.span,
+                format!(
+                    "`{}` は列挙型です。値は `{}.種類(…)` のように、種類を書いて作ります",
+                    shown, shown
+                ),
+            )
+            .hint(format!("種類は {} です", self.ctx.variant_names(i)))),
             // グローバル変数・ローカル変数・フィールドなどに入った関数（関数ポインタ）
             Some((Target::Top(TopName::Global(_)), _)) | None => self.call_indirect(e, callee, args),
         }
@@ -3881,7 +4456,7 @@ impl<'c, 'p> FnLower<'c, 'p> {
                     .hint("例：a:array:32 = array(10);"))
             }
         };
-        if init.is_none() && matches!(elem, Ty::Struct(..) | Ty::Func(..)) {
+        if init.is_none() && matches!(elem, Ty::Struct(..) | Ty::Enum(..) | Ty::Func(..)) {
             return Err(Diag::new(
                 e.span,
                 format!(
